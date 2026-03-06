@@ -89,7 +89,7 @@ async function deriveMarkdownFromHTML(
   );
   const hasJson = hasFormatOfType(meta.options.formats, "json");
   const hasSummary = hasFormatOfType(meta.options.formats, "summary");
-  const hasQuery = !!meta.options.query;
+  const hasQuery = hasFormatOfType(meta.options.formats, "query");
 
   if (
     !hasMarkdown &&
@@ -313,6 +313,7 @@ function coerceFieldsToFormats(meta: Meta, document: Document): Document {
   const hasScreenshot = hasFormatOfType(meta.options.formats, "screenshot");
   const hasSummary = hasFormatOfType(meta.options.formats, "summary");
   const hasBranding = hasFormatOfType(meta.options.formats, "branding");
+  const hasQueryFormat = hasFormatOfType(meta.options.formats, "query");
 
   if (!hasMarkdown && document.markdown !== undefined) {
     delete document.markdown;
@@ -427,8 +428,15 @@ function coerceFieldsToFormats(meta: Meta, document: Document): Document {
     );
   }
 
-  if (!meta.options.query && document.answer !== undefined) {
+  if (!hasQueryFormat && document.answer !== undefined) {
+    meta.logger.warn(
+      "Removed answer from Document because query wasn't in formats -- this is wasteful and indicates a bug.",
+    );
     delete document.answer;
+  } else if (hasQueryFormat && document.answer === undefined) {
+    meta.logger.warn(
+      "Request had format query, but there was no answer field in the result.",
+    );
   }
 
   if (!hasBranding && document.branding !== undefined) {

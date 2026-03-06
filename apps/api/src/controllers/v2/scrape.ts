@@ -389,7 +389,7 @@ export async function scrapeController(
         !!hasFormatOfType(req.body.formats, "json") ||
         !!hasFormatOfType(req.body.formats, "summary") ||
         !!hasFormatOfType(req.body.formats, "branding") ||
-        !!req.body.query;
+        !!hasFormatOfType(req.body.formats, "query");
 
       if (!usedLlm) {
         const ct = hasFormatOfType(req.body.formats, "changeTracking");

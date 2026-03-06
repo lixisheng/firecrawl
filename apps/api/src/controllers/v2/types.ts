@@ -400,6 +400,13 @@ const attributesFormatWithOptions = z.strictObject({
 
 type AttributesFormatWithOptions = z.output<typeof attributesFormatWithOptions>;
 
+const queryFormatWithOptions = z.strictObject({
+  type: z.literal("query"),
+  prompt: z.string().max(10000),
+});
+
+export type QueryFormatWithOptions = z.output<typeof queryFormatWithOptions>;
+
 export type FormatObject =
   | { type: "markdown" }
   | { type: "html" }
@@ -411,6 +418,7 @@ export type FormatObject =
   | ChangeTrackingFormatWithOptions
   | ScreenshotFormatWithOptions
   | AttributesFormatWithOptions
+  | QueryFormatWithOptions
   | { type: "branding" };
 
 const pdfModeSchema = z.enum(["fast", "auto", "ocr"]);
@@ -519,6 +527,7 @@ const baseScrapeOptions = z.strictObject({
           screenshotFormatWithOptions,
           attributesFormatWithOptions,
           z.strictObject({ type: z.literal("branding") }),
+          queryFormatWithOptions,
         ])
         .array()
         .optional()
@@ -567,7 +576,6 @@ const baseScrapeOptions = z.strictObject({
   __experimental_omce: z.boolean().prefault(false).optional(),
   __experimental_omceDomain: z.string().optional(),
   __experimental_engpicker: z.boolean().prefault(false).optional(),
-  query: z.string().max(1000).optional(),
 });
 
 type ScrapeOptionsBase = z.infer<typeof baseScrapeOptions>;

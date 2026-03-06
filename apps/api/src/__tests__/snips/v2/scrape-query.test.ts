@@ -18,14 +18,14 @@ beforeAll(async () => {
   });
 }, 10000 + scrapeTimeout);
 
-describe("Query parameter", () => {
+describe("Query format", () => {
   concurrentIf(TEST_PRODUCTION || HAS_AI)(
     "returns a non-empty answer for a valid query",
     async () => {
       const response = await scrape(
         {
           url: "https://firecrawl.dev",
-          query: "What is Firecrawl?",
+          formats: [{ type: "query", prompt: "What is Firecrawl?" }],
         },
         identity,
       );
@@ -38,13 +38,12 @@ describe("Query parameter", () => {
   );
 
   concurrentIf(TEST_PRODUCTION || HAS_AI)(
-    "returns both answer and markdown when formats include markdown",
+    "returns both answer and markdown when formats include markdown and query",
     async () => {
       const response = await scrape(
         {
           url: "https://firecrawl.dev",
-          formats: ["markdown"],
-          query: "What is Firecrawl?",
+          formats: ["markdown", { type: "query", prompt: "What is Firecrawl?" }],
         },
         identity,
       );
@@ -59,7 +58,7 @@ describe("Query parameter", () => {
   );
 
   concurrentIf(TEST_PRODUCTION || HAS_AI)(
-    "does not include answer field when no query param is provided",
+    "does not include answer field when query format is not provided",
     async () => {
       const response = await scrape(
         {
@@ -75,13 +74,13 @@ describe("Query parameter", () => {
   );
 
   it(
-    "rejects query over 1000 characters",
+    "rejects query prompt over 10000 characters",
     async () => {
-      const longQuery = "a".repeat(1001);
+      const longPrompt = "a".repeat(10001);
       const response = await scrapeWithFailure(
         {
           url: "https://firecrawl.dev",
-          query: longQuery,
+          formats: [{ type: "query", prompt: longPrompt }],
         } as any,
         identity,
       );

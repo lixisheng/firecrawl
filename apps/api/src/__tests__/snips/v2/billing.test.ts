@@ -68,7 +68,7 @@ describeIf(TEST_PRODUCTION)("Billing tests", () => {
         scrape(
           {
             url: TEST_SUITE_WEBSITE,
-            query: "What is Firecrawl?",
+            formats: [{ type: "query", prompt: "What is Firecrawl?" }],
           },
           identity,
         ),
