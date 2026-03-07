@@ -348,13 +348,16 @@ async function scrapeURLLoopIter(
       engine,
     );
 
-    const needsMarkdown = !!(
-      hasFormatOfType(meta.options.formats, "markdown") ||
-      hasFormatOfType(meta.options.formats, "changeTracking") ||
-      hasFormatOfType(meta.options.formats, "json") ||
-      hasFormatOfType(meta.options.formats, "summary") ||
-      hasFormatOfType(meta.options.formats, "query")
+    const hasMarkdown = hasFormatOfType(meta.options.formats, "markdown");
+    const hasChangeTracking = hasFormatOfType(
+      meta.options.formats,
+      "changeTracking",
     );
+    const hasJson = hasFormatOfType(meta.options.formats, "json");
+    const hasSummary = hasFormatOfType(meta.options.formats, "summary");
+    const hasQuery = hasFormatOfType(meta.options.formats, "query");
+    const needsMarkdown =
+      hasMarkdown || hasChangeTracking || hasJson || hasSummary || hasQuery;
 
     let checkMarkdown: string;
     const htmlSize = engineResult.html?.length ?? 0;
