@@ -256,12 +256,11 @@ class AutumnService {
   private backfillUsageIfNeeded(
     teamId: string,
     customerId: string,
-    currentValue: number,
   ): Promise<void> {
     const prev = this.backfillQueue.get(teamId) ?? Promise.resolve();
     const next = prev
       .catch(() => {}) // don't stall the queue on errors from the previous call
-      .then(() => this._backfillUsageIfNeeded(teamId, customerId, currentValue));
+      .then(() => this._backfillUsageIfNeeded(teamId, customerId));
     this.backfillQueue.set(teamId, next);
     next.finally(() => {
       if (this.backfillQueue.get(teamId) === next) {
@@ -274,7 +273,6 @@ class AutumnService {
   private async _backfillUsageIfNeeded(
     teamId: string,
     customerId: string,
-    currentValue: number,
   ): Promise<void> {
     // Fetch both modes in parallel so the combined Firecrawl total is
     // comparable to Autumn's single shared TEAM_CREDITS counter.
@@ -286,17 +284,16 @@ class AutumnService {
       (scrapeChunk?.adjusted_credits_used ?? 0) +
       (extractChunk?.adjusted_credits_used ?? 0);
 
-    // Exclude the current event's credits from the backfill: they will be
-    // tracked separately by the track() call in reserveCredits().
-    const firecrawlHistorical = firecrawlTotal - currentValue;
-    if (firecrawlHistorical <= 0) return;
+    // reserveCredits is called before the current event is committed to ACUC,
+    // so firecrawlTotal already excludes it — no subtraction needed.
+    if (firecrawlTotal <= 0) return;
 
     const entity = await this.getEntity({
       customerId,
       entityId: teamId,
     });
     const autumnUsage = this.getFeatureUsage(entity, CREDITS_FEATURE_ID);
-    const delta = firecrawlHistorical - autumnUsage;
+    const delta = firecrawlTotal - autumnUsage;
     if (delta <= 0) return;
 
     // Use whichever chunk has period metadata; prefer scrape as the default.
@@ -329,7 +326,9 @@ class AutumnService {
 
     try {
       const customerId = await this.ensureTrackingContext(teamId);
-      await this.backfillUsageIfNeeded(teamId, customerId, value);
+      await this.backfillUsageIfNeeded(teamId, customerId).catch(error => {
+        logger.warn("Autumn backfillUsageIfNeeded failed; continuing with direct track", { teamId, value, error });
+      });
       await this.track({
         customerId,
         entityId: teamId,

@@ -130,6 +130,13 @@ export async function processBillingBatch() {
         continue;
       }
 
+      // Compute per-group credit split before billing so the catch block can
+      // issue a refund even if supaBillTeam throws.
+      const reservedCredits = group.operations
+        .filter(op => op.autumnReserved)
+        .reduce((sum, op) => sum + op.credits, 0);
+      const unreservedCredits = group.total_credits - reservedCredits;
+
       try {
         // Execute the actual billing
         const billingResult = await withAuth(supaBillTeam, {
@@ -143,13 +150,6 @@ export async function processBillingBatch() {
           logger,
           group.is_extract,
         );
-
-        // Compute per-group credit split so mixed batches (some reserved in
-        // Autumn at request time, some not) are handled correctly.
-        const reservedCredits = group.operations
-          .filter(op => op.autumnReserved)
-          .reduce((sum, op) => sum + op.credits, 0);
-        const unreservedCredits = group.total_credits - reservedCredits;
 
         if (!billingResult.success) {
           logger.warn(
@@ -200,6 +200,18 @@ export async function processBillingBatch() {
             credits: group.total_credits,
           },
         });
+        // Billing threw before committing — refund any Autumn-reserved credits.
+        if (reservedCredits > 0) {
+          void autumnService.refundCredits({
+            teamId: group.team_id,
+            value: reservedCredits,
+            properties: {
+              source: "processBillingBatch_exception",
+              apiKeyId: group.api_key_id,
+              subscriptionId: group.subscription_id,
+            },
+          });
+        }
       }
     }
 
