@@ -26,6 +26,7 @@ import {
   lockURLsIndividually,
   normalizeURL,
   saveCrawl,
+  setCrawlError,
   StoredCrawl,
 } from "../../lib/crawl-redis";
 import { redisEvictConnection } from "../redis";
@@ -972,7 +973,9 @@ async function processKickoffJob(job: NuQJob<ScrapeJobKickoff>) {
   } catch (error) {
     logger.error("An error occurred!", { error });
     await finishCrawlKickoff(job.data.crawl_id);
-    const sc = (await getCrawl(job.data.crawl_id)) as StoredCrawl;
+    if (error instanceof Error) {
+      await setCrawlError(job.data.crawl_id, error.message);
+    }
     return { success: false, error };
   }
 }

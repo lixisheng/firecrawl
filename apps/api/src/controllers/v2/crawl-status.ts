@@ -8,6 +8,7 @@ import {
 } from "./types";
 import {
   getCrawl,
+  getCrawlError,
   getCrawlExpiry,
   getCrawlQualifiedJobCount,
   getDoneJobsOrderedLength,
@@ -225,8 +226,11 @@ export async function crawlStatusController(
       )
     : null;
 
+  // check if the crawl failed during kickoff (e.g. queue full)
+  const crawlError = await getCrawlError(req.params.jobId);
+
   let outputBulkA: {
-    status?: "completed" | "scraping" | "cancelled";
+    status?: "completed" | "scraping" | "cancelled" | "failed";
     completed?: number;
     total?: number;
     creditsUsed?: number;
@@ -240,6 +244,15 @@ export async function crawlStatusController(
       (numericStats.backlog ?? 0),
     creditsUsed: creditsRpc?.data?.[0]?.credits_billed ?? -1,
   };
+
+  // if the crawl has a stored error and no jobs were ever created, mark as failed
+  if (
+    crawlError &&
+    outputBulkA.total === 0 &&
+    outputBulkA.status !== "scraping"
+  ) {
+    outputBulkA.status = "failed";
+  }
 
   let outputBulkB: {
     data: Document[];
@@ -337,6 +350,19 @@ export async function crawlStatusController(
         }
       }
     }
+  }
+
+  if (outputBulkA.status === "failed" && crawlError) {
+    return res.status(200).json({
+      success: false,
+      error: crawlError,
+      status: "failed",
+      completed: 0,
+      total: 0,
+      creditsUsed: outputBulkA.creditsUsed ?? 0,
+      expiresAt: (await getCrawlExpiry(req.params.jobId)).toISOString(),
+      data: [],
+    });
   }
 
   return res.status(200).json({
