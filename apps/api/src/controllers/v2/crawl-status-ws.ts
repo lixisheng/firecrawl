@@ -150,7 +150,7 @@ async function crawlStatusWS(
         ? "completed"
         : "scraping";
 
-  if (crawlError && jobIDs.length === 0 && status !== "scraping") {
+  if (crawlError && jobIDs.length === 0 && status === "completed") {
     status = "failed";
   }
 

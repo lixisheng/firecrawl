@@ -1172,7 +1172,7 @@ export type ConcurrencyCheckResponse =
 export type CrawlStatusResponse =
   | ErrorResponse
   | {
-      success: boolean;
+      success: true;
       status: "scraping" | "completed" | "failed" | "cancelled";
       completed: number;
       total: number;
@@ -1180,7 +1180,16 @@ export type CrawlStatusResponse =
       expiresAt: string;
       next?: string;
       data: Document[];
-      error?: string;
+    }
+  | {
+      success: false;
+      status: "failed";
+      error: string;
+      completed: number;
+      total: number;
+      creditsUsed: number;
+      expiresAt: string;
+      data: Document[];
     };
 
 export type OngoingCrawlsResponse =

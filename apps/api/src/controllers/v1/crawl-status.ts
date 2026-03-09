@@ -229,9 +229,23 @@ export async function crawlStatusController(
   if (
     crawlError &&
     outputBulkA.total === 0 &&
-    outputBulkA.status !== "scraping"
+    outputBulkA.status === "completed"
   ) {
     outputBulkA.status = "failed";
+  }
+
+  // if the crawl failed during kickoff, return immediately without fetching/processing jobs (there are none)
+  if (outputBulkA.status === "failed" && crawlError) {
+    return res.status(200).json({
+      success: false,
+      error: crawlError,
+      status: "failed",
+      completed: 0,
+      total: 0,
+      creditsUsed: outputBulkA.creditsUsed ?? 0,
+      expiresAt: (await getCrawlExpiry(req.params.jobId)).toISOString(),
+      data: [],
+    });
   }
 
   let outputBulkB: {
@@ -290,19 +304,6 @@ export async function crawlStatusController(
         ? `${req.protocol}://${req.get("host")}/v1/${isBatch ? "batch/scrape" : "crawl"}/${req.params.jobId}?skip=${start + iteratedOver}${req.query.limit ? `&limit=${req.query.limit}` : ""}`
         : undefined,
   };
-
-  if (outputBulkA.status === "failed" && crawlError) {
-    return res.status(200).json({
-      success: false,
-      error: crawlError,
-      status: "failed",
-      completed: 0,
-      total: 0,
-      creditsUsed: outputBulkA.creditsUsed ?? 0,
-      expiresAt: (await getCrawlExpiry(req.params.jobId)).toISOString(),
-      data: [],
-    });
-  }
 
   return res.status(200).json({
     success: true,
