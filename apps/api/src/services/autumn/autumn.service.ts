@@ -16,11 +16,12 @@ import type {
 const CREDITS_FEATURE_ID = "CREDITS";
 
 /**
- * Returns true when the Autumn experiment is active for this call.
+ * Returns true when the Autumn experiment is active.
  *
- * Mirrors the PDF_MU_V2_EXPERIMENT / PDF_MU_V2_EXPERIMENT_PERCENT pattern:
- *   - AUTUMN_EXPERIMENT must be "true"
- *   - A random roll must fall below AUTUMN_EXPERIMENT_PERCENT (0-100)
+ * Checked once at each top-level billing entry point (`reserveCredits`).
+ * NOT checked by `refundCredits` (already guarded by `autumnReserved`) or
+ * `ensureTeamProvisioned` (called internally by reserveCredits after the
+ * gate, and also handled by firecrawl-web edge functions independently).
  */
 export function isAutumnEnabled(): boolean {
   return (
@@ -241,7 +242,6 @@ export class AutumnService {
     orgId,
     name,
   }: EnsureTeamProvisionedParams): Promise<void> {
-    if (!isAutumnEnabled()) return;
     if (this.isPreviewTeam(teamId)) return;
     // Fast path: team is already fully provisioned.
     if (this.ensuredTeams.has(teamId)) return;
@@ -346,7 +346,6 @@ export class AutumnService {
     value,
     properties,
   }: TrackCreditsParams): Promise<void> {
-    if (!isAutumnEnabled()) return;
     if (!autumnClient) return;
     if (this.isPreviewTeam(teamId)) return;
 

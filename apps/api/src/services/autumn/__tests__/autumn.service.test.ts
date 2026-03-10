@@ -354,7 +354,7 @@ describe("isAutumnEnabled", () => {
   });
 });
 
-describe("experiment gate on public methods", () => {
+describe("experiment gate on reserveCredits", () => {
   afterEach(() => {
     (config as any).AUTUMN_EXPERIMENT = "true";
     (config as any).AUTUMN_EXPERIMENT_PERCENT = 100;
@@ -368,18 +368,27 @@ describe("experiment gate on public methods", () => {
     expect(mockTrack).not.toHaveBeenCalled();
   });
 
-  it("refundCredits is a no-op when experiment is disabled", async () => {
+  it("refundCredits still works when experiment is disabled (guard is autumnReserved)", async () => {
     (config as any).AUTUMN_EXPERIMENT = undefined;
     const svc = makeService();
+    // Warm the caches so refund can resolve the tracking context.
+    (config as any).AUTUMN_EXPERIMENT = "true";
+    await svc.reserveCredits({ teamId: "team-1", value: 10 });
+    jest.clearAllMocks();
+
+    // Disable experiment — refund must still succeed to avoid orphaned credits.
+    (config as any).AUTUMN_EXPERIMENT = undefined;
+    mockTrack.mockResolvedValue(undefined);
     await svc.refundCredits({ teamId: "team-1", value: 10 });
-    expect(mockTrack).not.toHaveBeenCalled();
+    expect(mockTrack).toHaveBeenCalled();
   });
 
-  it("ensureTeamProvisioned is a no-op when experiment is disabled", async () => {
+  it("ensureTeamProvisioned still works when experiment is disabled (handled by firecrawl-web)", async () => {
     (config as any).AUTUMN_EXPERIMENT = undefined;
     const svc = makeService();
     await svc.ensureTeamProvisioned({ teamId: "team-1", orgId: "org-1" });
-    expect(mockGetOrCreate).not.toHaveBeenCalled();
-    expect(mockEntityGet).not.toHaveBeenCalled();
+    // Provisioning should proceed — firecrawl-web edge functions do this
+    // regardless, so gating API-side provisioning is unnecessary.
+    expect(mockGetOrCreate).toHaveBeenCalled();
   });
 });
