@@ -1613,10 +1613,23 @@ const pdfCategoryOptions = z.strictObject({
   type: z.literal("pdf"),
 });
 
+const searchQueryInput = z.string().refine(value => value.trim().length > 0, {
+  error: "Query cannot be empty",
+});
+
+const searchQueryDecompositionOptions = z.strictObject({
+  mode: z.literal("auto").optional().prefault("auto"),
+  maxQueries: z.int().positive().finite().min(2).max(10).optional().prefault(4),
+});
+
 export const searchRequestSchema = z
   .strictObject({
-    query: z.string(),
+    query: z.union([
+      searchQueryInput,
+      z.array(searchQueryInput).min(1).max(25),
+    ]),
     limit: z.int().positive().finite().max(100).optional().prefault(10),
+    resultsPerQuery: z.int().positive().finite().max(100).optional(),
     tbs: z.string().optional(),
     filter: z.string().optional(),
     sources: z
@@ -1657,6 +1670,7 @@ export const searchRequestSchema = z
     timeout: z.int().positive().finite().prefault(60000),
     ignoreInvalidURLs: z.boolean().optional().prefault(false),
     asyncScraping: z.boolean().optional().prefault(false),
+    queryDecomposition: searchQueryDecompositionOptions.optional(),
     __searchPreviewToken: z.string().optional(),
     scrapeOptions: baseScrapeOptions
       .extend({
@@ -1700,10 +1714,23 @@ export const searchRequestSchema = z
       })
       .optional(),
   })
+  .superRefine((x, ctx) => {
+    if (Array.isArray(x.query) && x.queryDecomposition) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["queryDecomposition"],
+        message:
+          "queryDecomposition is only supported when query is a single string",
+      });
+    }
+  })
   .refine(x => waitForRefine(x.scrapeOptions), waitForRefineOpts)
   .transform(x => {
     const country =
       x.country !== undefined ? x.country : x.location ? undefined : "us";
+    const isMultiQuery = Array.isArray(x.query) || !!x.queryDecomposition;
+    const resultsPerQuery =
+      x.resultsPerQuery ?? (isMultiQuery ? Math.min(x.limit, 5) : x.limit);
 
     // Transform string array sources to object format
     let sources = x.sources;
@@ -1774,6 +1801,10 @@ export const searchRequestSchema = z
     return {
       ...x,
       country,
+      query: Array.isArray(x.query)
+        ? x.query.map(query => query.trim())
+        : x.query,
+      resultsPerQuery,
       sources,
       categories,
       scrapeOptions: extractTransform(x.scrapeOptions),

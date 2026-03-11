@@ -1,18 +1,18 @@
-import type { ZodTypeAny } from 'zod';
+import type { ZodTypeAny } from "zod";
 // Public types for Firecrawl JS/TS SDK v2 (camelCase only)
 
 export type FormatString =
-  | 'markdown'
-  | 'html'
-  | 'rawHtml'
-  | 'links'
-  | 'images'
-  | 'screenshot'
-  | 'summary'
-  | 'changeTracking'
-  | 'json'
-  | 'attributes'
-  | 'branding';
+  | "markdown"
+  | "html"
+  | "rawHtml"
+  | "links"
+  | "images"
+  | "screenshot"
+  | "summary"
+  | "changeTracking"
+  | "json"
+  | "attributes"
+  | "branding";
 
 export interface Viewport {
   width: number;
@@ -24,27 +24,27 @@ export interface Format {
 }
 
 export interface JsonFormat extends Format {
-  type: 'json';
+  type: "json";
   prompt?: string;
   schema?: Record<string, unknown> | ZodTypeAny;
 }
 
 export interface ScreenshotFormat {
-  type: 'screenshot';
+  type: "screenshot";
   fullPage?: boolean;
   quality?: number;
   viewport?: Viewport | { width: number; height: number };
 }
 
 export interface ChangeTrackingFormat extends Format {
-  type: 'changeTracking';
-  modes: ('git-diff' | 'json')[];
+  type: "changeTracking";
+  modes: ("git-diff" | "json")[];
   schema?: Record<string, unknown>;
   prompt?: string;
   tag?: string;
 }
 export interface AttributesFormat extends Format {
-  type: 'attributes';
+  type: "attributes";
   selectors: Array<{
     selector: string;
     attribute: string;
@@ -65,62 +65,62 @@ export interface LocationConfig {
 }
 
 export interface WaitAction {
-  type: 'wait';
+  type: "wait";
   milliseconds?: number;
   selector?: string;
 }
 
 export interface ScreenshotAction {
-  type: 'screenshot';
+  type: "screenshot";
   fullPage?: boolean;
   quality?: number;
   viewport?: Viewport | { width: number; height: number };
 }
 
 export interface ClickAction {
-  type: 'click';
+  type: "click";
   selector: string;
 }
 
 export interface WriteAction {
-  type: 'write';
+  type: "write";
   text: string;
 }
 
 export interface PressAction {
-  type: 'press';
+  type: "press";
   key: string;
 }
 
 export interface ScrollAction {
-  type: 'scroll';
-  direction: 'up' | 'down';
+  type: "scroll";
+  direction: "up" | "down";
   selector?: string;
 }
 
 export interface ScrapeAction {
-  type: 'scrape';
+  type: "scrape";
 }
 
 export interface ExecuteJavascriptAction {
-  type: 'executeJavascript';
+  type: "executeJavascript";
   script: string;
 }
 
 export interface PDFAction {
-  type: 'pdf';
+  type: "pdf";
   format?:
-    | 'A0'
-    | 'A1'
-    | 'A2'
-    | 'A3'
-    | 'A4'
-    | 'A5'
-    | 'A6'
-    | 'Letter'
-    | 'Legal'
-    | 'Tabloid'
-    | 'Ledger';
+    | "A0"
+    | "A1"
+    | "A2"
+    | "A3"
+    | "A4"
+    | "A5"
+    | "A6"
+    | "Letter"
+    | "Legal"
+    | "Tabloid"
+    | "Ledger";
   landscape?: boolean;
   scale?: number;
 }
@@ -145,7 +145,9 @@ export interface ScrapeOptions {
   timeout?: number;
   waitFor?: number;
   mobile?: boolean;
-  parsers?: Array<string | { type: 'pdf'; mode?: 'fast' | 'auto' | 'ocr'; maxPages?: number }>;
+  parsers?: Array<
+    string | { type: "pdf"; mode?: "fast" | "auto" | "ocr"; maxPages?: number }
+  >;
   actions?: ActionOption[];
   location?: LocationConfig;
   skipTlsVerification?: boolean;
@@ -153,7 +155,7 @@ export interface ScrapeOptions {
   fastMode?: boolean;
   useMock?: string;
   blockAds?: boolean;
-  proxy?: 'basic' | 'stealth' | 'enhanced' | 'auto' | string;
+  proxy?: "basic" | "stealth" | "enhanced" | "auto" | string;
   maxAge?: number;
   minAge?: number;
   storeInCache?: boolean;
@@ -165,11 +167,16 @@ export interface WebhookConfig {
   url: string;
   headers?: Record<string, string>;
   metadata?: Record<string, string>;
-  events?: Array<'completed' | 'failed' | 'page' | 'started'>;
+  events?: Array<"completed" | "failed" | "page" | "started">;
 }
 
 // Agent webhook events differ from crawl: has 'action' and 'cancelled', no 'page'
-export type AgentWebhookEvent = 'started' | 'action' | 'completed' | 'failed' | 'cancelled';
+export type AgentWebhookEvent =
+  | "started"
+  | "action"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface AgentWebhookConfig {
   url: string;
@@ -179,7 +186,7 @@ export interface AgentWebhookConfig {
 }
 
 export interface BrandingProfile {
-  colorScheme?: 'light' | 'dark';
+  colorScheme?: "light" | "dark";
   logo?: string | null;
   fonts?: Array<{
     family: string;
@@ -301,13 +308,13 @@ export interface BrandingProfile {
   };
   personality?: {
     tone:
-      | 'professional'
-      | 'playful'
-      | 'modern'
-      | 'traditional'
-      | 'minimalist'
-      | 'bold';
-    energy: 'low' | 'medium' | 'high';
+      | "professional"
+      | "playful"
+      | "modern"
+      | "traditional"
+      | "minimalist"
+      | "bold";
+    energy: "low" | "medium" | "high";
     targetAudience: string;
   };
   [key: string]: unknown;
@@ -359,8 +366,8 @@ export interface DocumentMetadata {
   numPages?: number;
   contentType?: string;
   timezone?: string;
-  proxyUsed?: 'basic' | 'stealth';
-  cacheState?: 'hit' | 'miss';
+  proxyUsed?: "basic" | "stealth";
+  cacheState?: "hit" | "miss";
   cachedAt?: string;
   creditsUsed?: number;
   concurrencyLimited?: boolean;
@@ -431,23 +438,44 @@ export interface SearchResultImages {
   position?: number;
 }
 
-export interface SearchData {
+export interface SearchQueryPlanSearch {
+  query: string;
+  goal?: string;
   web?: Array<SearchResultWeb | Document>;
   news?: Array<SearchResultNews | Document>;
   images?: Array<SearchResultImages | Document>;
 }
 
+export interface SearchQueryPlan {
+  mode: "auto" | "batch";
+  originalQuery?: string;
+  resultsPerQuery: number;
+  searches: SearchQueryPlanSearch[];
+}
+
+export interface SearchData {
+  web?: Array<SearchResultWeb | Document>;
+  news?: Array<SearchResultNews | Document>;
+  images?: Array<SearchResultImages | Document>;
+  queryPlan?: SearchQueryPlan;
+}
+
 export interface CategoryOption {
-  type: 'github' | 'research' | 'pdf';
+  type: "github" | "research" | "pdf";
 }
 
 export interface SearchRequest {
-  query: string;
+  query: string | string[];
   sources?: Array<
-    'web' | 'news' | 'images' | { type: 'web' | 'news' | 'images' }
+    "web" | "news" | "images" | { type: "web" | "news" | "images" }
   >;
-  categories?: Array<'github' | 'research' | 'pdf' | CategoryOption>;
+  categories?: Array<"github" | "research" | "pdf" | CategoryOption>;
   limit?: number;
+  resultsPerQuery?: number;
+  queryDecomposition?: {
+    mode?: "auto";
+    maxQueries?: number;
+  };
   tbs?: string;
   location?: string;
   ignoreInvalidURLs?: boolean;
@@ -462,7 +490,7 @@ export interface CrawlOptions {
   excludePaths?: string[] | null;
   includePaths?: string[] | null;
   maxDiscoveryDepth?: number | null;
-  sitemap?: 'skip' | 'include' | 'only';
+  sitemap?: "skip" | "include" | "only";
   ignoreQueryParameters?: boolean;
   deduplicateSimilarURLs?: boolean;
   limit?: number | null;
@@ -486,7 +514,7 @@ export interface CrawlResponse {
 
 export interface CrawlJob {
   id: string;
-  status: 'scraping' | 'completed' | 'failed' | 'cancelled';
+  status: "scraping" | "completed" | "failed" | "cancelled";
   total: number;
   completed: number;
   creditsUsed?: number;
@@ -515,7 +543,7 @@ export interface BatchScrapeResponse {
 
 export interface BatchScrapeJob {
   id: string;
-  status: 'scraping' | 'completed' | 'failed' | 'cancelled';
+  status: "scraping" | "completed" | "failed" | "cancelled";
   completed: number;
   total: number;
   creditsUsed?: number;
@@ -530,7 +558,7 @@ export interface MapData {
 
 export interface MapOptions {
   search?: string;
-  sitemap?: 'only' | 'include' | 'skip';
+  sitemap?: "only" | "include" | "skip";
   includeSubdomains?: boolean;
   ignoreQueryParameters?: boolean;
   limit?: number;
@@ -543,7 +571,7 @@ export interface MapOptions {
 export interface ExtractResponse {
   success?: boolean;
   id?: string;
-  status?: 'processing' | 'completed' | 'failed' | 'cancelled';
+  status?: "processing" | "completed" | "failed" | "cancelled";
   data?: unknown;
   error?: string;
   warning?: string;
@@ -560,16 +588,16 @@ export interface AgentResponse {
 
 export interface AgentStatusResponse {
   success: boolean;
-  status: 'processing' | 'completed' | 'failed';
+  status: "processing" | "completed" | "failed";
   error?: string;
   data?: unknown;
-  model?: 'spark-1-pro' | 'spark-1-mini';
+  model?: "spark-1-pro" | "spark-1-mini";
   expiresAt: string;
   creditsUsed?: number;
 }
 
 export interface AgentOptions {
-  model: 'FIRE-1' | 'v3-beta';
+  model: "FIRE-1" | "v3-beta";
 }
 
 export interface ConcurrencyCheck {
@@ -655,10 +683,10 @@ export class SdkError extends Error {
     status?: number,
     code?: string,
     details?: unknown,
-    jobId?: string
+    jobId?: string,
   ) {
     super(message);
-    this.name = 'FirecrawlSdkError';
+    this.name = "FirecrawlSdkError";
     this.status = status;
     this.code = code;
     this.details = details;
@@ -668,16 +696,20 @@ export class SdkError extends Error {
 
 export class JobTimeoutError extends SdkError {
   timeoutSeconds: number;
-  constructor(jobId: string, timeoutSeconds: number, jobType: 'batch' | 'crawl' = 'batch') {
-    const jobTypeLabel = jobType === 'batch' ? 'batch scrape' : 'crawl';
+  constructor(
+    jobId: string,
+    timeoutSeconds: number,
+    jobType: "batch" | "crawl" = "batch",
+  ) {
+    const jobTypeLabel = jobType === "batch" ? "batch scrape" : "crawl";
     super(
       `${jobTypeLabel.charAt(0).toUpperCase() + jobTypeLabel.slice(1)} job ${jobId} did not complete within ${timeoutSeconds} seconds`,
       undefined,
-      'JOB_TIMEOUT',
+      "JOB_TIMEOUT",
       undefined,
-      jobId
+      jobId,
     );
-    this.name = 'JobTimeoutError';
+    this.name = "JobTimeoutError";
     this.timeoutSeconds = timeoutSeconds;
   }
 }

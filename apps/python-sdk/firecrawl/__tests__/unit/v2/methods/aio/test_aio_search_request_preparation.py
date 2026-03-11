@@ -28,6 +28,8 @@ class TestAsyncSearchRequestPreparation:
             query="test query",
             sources=["web", "news"],
             limit=10,
+            results_per_query=3,
+            query_decomposition={"maxQueries": 4},
             tbs="qdr:w",
             location="US",
             ignore_invalid_urls=False,
@@ -37,6 +39,8 @@ class TestAsyncSearchRequestPreparation:
         )
         data = _prepare_search_request(request)
         assert data["ignoreInvalidURLs"] is False
+        assert data["resultsPerQuery"] == 3
+        assert data["queryDecomposition"]["maxQueries"] == 4
         assert "scrapeOptions" in data
         assert data["integration"] == "_unit-test"
 
@@ -62,3 +66,9 @@ class TestAsyncSearchRequestPreparation:
         scrape_data = data["scrapeOptions"]
         assert "onlyMainContent" in scrape_data
         assert "mobile" in scrape_data
+
+    def test_batch_query_preparation(self):
+        request = SearchRequest(query=["alpha", "beta"], results_per_query=2)
+        data = _prepare_search_request(request)
+        assert data["query"] == ["alpha", "beta"]
+        assert data["resultsPerQuery"] == 2

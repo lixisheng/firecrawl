@@ -14,6 +14,7 @@ from .types import (
     SearchData,
     SourceOption,
     CategoryOption,
+    SearchQueryDecomposition,
     CrawlRequest,
     CrawlResponse,
     CrawlJob,
@@ -187,11 +188,13 @@ class FirecrawlClient:
 
     def search(
         self,
-        query: str,
+        query: Union[str, List[str]],
         *,
         sources: Optional[List[SourceOption]] = None,
         categories: Optional[List[CategoryOption]] = None,
         limit: Optional[int] = None,
+        results_per_query: Optional[int] = None,
+        query_decomposition: Optional[Union[SearchQueryDecomposition, Dict[str, Any]]] = None,
         tbs: Optional[str] = None,
         location: Optional[str] = None,
         ignore_invalid_urls: Optional[bool] = None,
@@ -203,7 +206,7 @@ class FirecrawlClient:
         Search for documents.
         
         Args:
-            query: Search query string
+            query: Search query string, or a list of query strings for batch mode
             limit: Maximum number of results to return (default: 5)
             tbs: Time-based search filter
             location: Location string for search
@@ -218,6 +221,8 @@ class FirecrawlClient:
             sources=sources,
             categories=categories,
             limit=limit,
+            results_per_query=results_per_query,
+            query_decomposition=query_decomposition,
             tbs=tbs,
             location=location,
             ignore_invalid_urls=ignore_invalid_urls,

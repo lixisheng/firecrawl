@@ -160,10 +160,26 @@ export interface WebSearchResult {
 
 export type SearchResultType = "web" | "images" | "news";
 
+export interface SearchQueryPlanSearch {
+  query: string;
+  goal?: string;
+  web?: WebSearchResult[];
+  images?: ImageSearchResult[];
+  news?: NewsSearchResult[];
+}
+
+export interface SearchQueryPlan {
+  mode: "auto" | "batch";
+  originalQuery?: string;
+  resultsPerQuery: number;
+  searches: SearchQueryPlanSearch[];
+}
+
 export interface SearchV2Response {
   web?: WebSearchResult[];
   images?: ImageSearchResult[];
   news?: NewsSearchResult[];
+  queryPlan?: SearchQueryPlan;
 }
 
 export interface ScrapeActionContent {

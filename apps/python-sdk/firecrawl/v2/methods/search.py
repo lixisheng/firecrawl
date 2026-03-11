@@ -3,7 +3,7 @@ Search functionality for Firecrawl v2 API.
 """
 
 from typing import Dict, Any, Union, List, TypeVar, Type
-from ..types import SearchRequest, SearchData, Document, SearchResultWeb, SearchResultNews, SearchResultImages
+from ..types import SearchRequest, SearchData, Document, SearchResultWeb, SearchResultNews, SearchResultImages, SearchQueryPlan, SearchQueryPlanSearch
 from ..utils.normalize import normalize_document_input, _map_search_result_keys
 from ..utils import HttpClient, handle_response_error, validate_scrape_options, prepare_scrape_options
 
@@ -35,20 +35,47 @@ def search(
         if not response_data.get("success"):
             handle_response_error(response, "search")
         data = response_data.get("data", {}) or {}
-        out = SearchData()
-        if "web" in data:
-            out.web = _transform_array(data["web"], SearchResultWeb)
-        if "news" in data:
-            out.news = _transform_array(data["news"], SearchResultNews)
-        if "images" in data:
-            out.images = _transform_array(data["images"], SearchResultImages)
-        return out
+        return _transform_search_data(data)
     except Exception as err:
         # If the error is an HTTP error from requests, handle it
         # (simulate isAxiosError by checking for requests' HTTPError or Response)
         if hasattr(err, "response"):
             handle_response_error(getattr(err, "response"), "search")
         raise err
+
+def _transform_search_data(data: Dict[str, Any]) -> SearchData:
+    out = SearchData()
+    if "web" in data:
+        out.web = _transform_array(data["web"], SearchResultWeb)
+    if "news" in data:
+        out.news = _transform_array(data["news"], SearchResultNews)
+    if "images" in data:
+        out.images = _transform_array(data["images"], SearchResultImages)
+    if isinstance(data.get("queryPlan"), dict):
+        out.query_plan = _transform_query_plan(data["queryPlan"])
+    return out
+
+def _transform_query_plan(plan: Dict[str, Any]) -> SearchQueryPlan:
+    searches: List[SearchQueryPlanSearch] = []
+    for entry in plan.get("searches", []) or []:
+        search_entry = SearchQueryPlanSearch(
+            query=str(entry.get("query", "")),
+            goal=entry.get("goal"),
+        )
+        if "web" in entry:
+            search_entry.web = _transform_array(entry["web"], SearchResultWeb)
+        if "news" in entry:
+            search_entry.news = _transform_array(entry["news"], SearchResultNews)
+        if "images" in entry:
+            search_entry.images = _transform_array(entry["images"], SearchResultImages)
+        searches.append(search_entry)
+
+    return SearchQueryPlan(
+        mode=plan.get("mode"),
+        original_query=plan.get("originalQuery"),
+        results_per_query=plan.get("resultsPerQuery"),
+        searches=searches,
+    )
 
 def _transform_array(arr: List[Any], result_type: Type[T]) -> List[Union[T, 'Document']]:
     """
@@ -103,23 +130,46 @@ def _validate_search_request(request: SearchRequest) -> SearchRequest:
         ValueError: If request is invalid
     """
     # Validate query
-    if not request.query or not request.query.strip():
-        raise ValueError("Query cannot be empty")
-    
+    if isinstance(request.query, str):
+        if not request.query or not request.query.strip():
+            raise ValueError("Query cannot be empty")
+    elif isinstance(request.query, list):
+        if len(request.query) == 0:
+            raise ValueError("Query array cannot be empty")
+        if any((not isinstance(query, str)) or (not query.strip()) for query in request.query):
+            raise ValueError("Query array cannot contain empty strings")
+    else:
+        raise ValueError("Query must be a string or list of strings")
+
     # Validate limit
     if request.limit is not None:
         if request.limit <= 0:
             raise ValueError("Limit must be positive")
         if request.limit > 100:
             raise ValueError("Limit cannot exceed 100")
-    
+
+    if request.results_per_query is not None:
+        if request.results_per_query <= 0:
+            raise ValueError("results_per_query must be positive")
+        if request.results_per_query > 100:
+            raise ValueError("results_per_query cannot exceed 100")
+
     # Validate timeout
     if request.timeout is not None:
         if request.timeout <= 0:
             raise ValueError("Timeout must be positive")
         if request.timeout > 300000:  # 5 minutes max
             raise ValueError("Timeout cannot exceed 300000ms (5 minutes)")
-    
+
+    if request.query_decomposition is not None:
+        if not isinstance(request.query, str):
+            raise ValueError("query_decomposition requires a single string query")
+        if request.query_decomposition.max_queries is not None:
+            if request.query_decomposition.max_queries < 2:
+                raise ValueError("query_decomposition.max_queries must be at least 2")
+            if request.query_decomposition.max_queries > 10:
+                raise ValueError("query_decomposition.max_queries cannot exceed 10")
+
     # Validate sources (if provided)
     if request.sources is not None:
         valid_sources = {"web", "news", "images"}
@@ -185,7 +235,18 @@ def _prepare_search_request(request: SearchRequest) -> Dict[str, Any]:
     if validated_request.ignore_invalid_urls is not None:
         data["ignoreInvalidURLs"] = validated_request.ignore_invalid_urls
         data.pop("ignore_invalid_urls", None)
-    
+
+    if validated_request.results_per_query is not None:
+        data["resultsPerQuery"] = validated_request.results_per_query
+        data.pop("results_per_query", None)
+
+    if validated_request.query_decomposition is not None:
+        data["queryDecomposition"] = validated_request.query_decomposition.model_dump(
+            exclude_none=True,
+            by_alias=True,
+        )
+        data.pop("query_decomposition", None)
+
     # scrape_options → scrapeOptions
     if validated_request.scrape_options is not None:
         scrape_data = prepare_scrape_options(validated_request.scrape_options)

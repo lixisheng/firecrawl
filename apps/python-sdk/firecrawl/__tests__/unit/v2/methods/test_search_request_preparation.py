@@ -39,6 +39,8 @@ class TestSearchRequestPreparation:
             query="test query",
             sources=["web", "news"],
             limit=10,
+            results_per_query=3,
+            query_decomposition={"maxQueries": 4},
             tbs="qdr:w",
             location="US",
             ignore_invalid_urls=False,
@@ -52,6 +54,8 @@ class TestSearchRequestPreparation:
         # Check all basic fields
         assert data["query"] == "test query"
         assert data["limit"] == 10
+        assert data["resultsPerQuery"] == 3
+        assert data["queryDecomposition"]["maxQueries"] == 4
         assert data["tbs"] == "qdr:w"
         assert data["location"] == "US"
         assert data["timeout"] == 30000
@@ -167,3 +171,14 @@ class TestSearchRequestPreparation:
         assert "wait_for" not in scrape_data
         assert "skip_tls_verification" not in scrape_data
         assert "remove_base64_images" not in scrape_data
+
+    def test_batch_query_preparation(self):
+        request = SearchRequest(
+            query=["alpha", "beta"],
+            results_per_query=2,
+        )
+
+        data = _prepare_search_request(request)
+
+        assert data["query"] == ["alpha", "beta"]
+        assert data["resultsPerQuery"] == 2

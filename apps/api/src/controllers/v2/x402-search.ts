@@ -231,6 +231,14 @@ export async function x402SearchController(
   try {
     req.body = searchRequestSchema.parse(req.body);
 
+    if (Array.isArray(req.body.query) || req.body.queryDecomposition) {
+      return res.status(400).json({
+        success: false,
+        error:
+          "Batch search and query decomposition are not supported on x402 search.",
+      });
+    }
+
     // IMPORTANT NOTE: Force results to be at most 10 even if a larger limit is requested
     const MAX_RESULTS = 10;
     if (req.body.limit > MAX_RESULTS) {

@@ -19,6 +19,14 @@ import {
 } from "../../services/sentry";
 import { executeSearch } from "../../search/execute";
 
+function getSearchTargetHint(query: SearchRequest["query"]): string {
+  if (Array.isArray(query)) {
+    return query.join(" | ");
+  }
+
+  return query;
+}
+
 export async function searchController(
   req: RequestWithAuth<{}, SearchResponse, SearchRequest>,
   res: Response<SearchResponse>,
@@ -72,10 +80,12 @@ export async function searchController(
 
     const shouldBill = req.body.__agentInterop?.shouldBill ?? true;
     const agentRequestId = req.body.__agentInterop?.requestId ?? null;
+    const targetHint = getSearchTargetHint(req.body.query);
 
     logger = logger.child({
       version: "v2",
-      query: req.body.query,
+      query: targetHint,
+      queryCount: Array.isArray(req.body.query) ? req.body.query.length : 1,
       origin: req.body.origin,
     });
 
@@ -93,7 +103,7 @@ export async function searchController(
         team_id: req.auth.team_id,
         origin: req.body.origin ?? "api",
         integration: req.body.integration,
-        target_hint: req.body.query,
+        target_hint: targetHint,
         zeroDataRetention: isZDROrAnon ?? false,
         api_key_id: req.acuc?.api_key_id ?? null,
       });
@@ -103,6 +113,8 @@ export async function searchController(
       {
         query: req.body.query,
         limit: req.body.limit,
+        resultsPerQuery: req.body.resultsPerQuery,
+        queryDecomposition: req.body.queryDecomposition,
         tbs: req.body.tbs,
         filter: req.body.filter,
         lang: req.body.lang,
@@ -147,7 +159,7 @@ export async function searchController(
       {
         id: jobId,
         request_id: agentRequestId ?? jobId,
-        query: req.body.query,
+        query: targetHint,
         is_successful: true,
         error: undefined,
         results: result.response as any,

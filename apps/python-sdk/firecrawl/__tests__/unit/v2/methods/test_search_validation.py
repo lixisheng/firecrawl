@@ -109,6 +109,10 @@ class TestSearchValidation:
         validated = _validate_search_request(request)
         assert validated == request
 
+        batch_request = SearchRequest(query=["test one", "test two"])
+        validated_batch = _validate_search_request(batch_request)
+        assert validated_batch == batch_request
+
         # Request with all optional parameters
         request = SearchRequest(
             query="test query",
@@ -179,6 +183,34 @@ class TestSearchValidation:
         request = SearchRequest(query="test", scrape_options=invalid_scrape_opts)
         with pytest.raises(ValueError, match="Timeout must be positive"):
             _validate_search_request(request)
+
+    def test_validate_query_decomposition_constraints(self):
+        request = SearchRequest(
+            query="complex topic",
+            query_decomposition={"maxQueries": 4},
+            results_per_query=3,
+        )
+        validated = _validate_search_request(request)
+        assert validated == request
+
+        with pytest.raises(ValueError, match="query_decomposition requires a single string query"):
+            _validate_search_request(
+                SearchRequest(
+                    query=["one", "two"],
+                    query_decomposition={"maxQueries": 3},
+                )
+            )
+
+        with pytest.raises(ValueError, match="results_per_query must be positive"):
+            _validate_search_request(SearchRequest(query="test", results_per_query=0))
+
+        with pytest.raises(ValueError, match="query_decomposition.max_queries must be at least 2"):
+            _validate_search_request(
+                SearchRequest(
+                    query="test",
+                    query_decomposition={"maxQueries": 1},
+                )
+            )
 
 
 

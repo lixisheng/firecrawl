@@ -645,6 +645,36 @@ class SearchResultImages(BaseModel):
     position: Optional[int] = None
 
 
+class SearchQueryPlanSearch(BaseModel):
+    """A grouped set of results for a single planned search query."""
+
+    query: str
+    goal: Optional[str] = None
+    web: Optional[List[Union[SearchResultWeb, Document]]] = None
+    news: Optional[List[Union[SearchResultNews, Document]]] = None
+    images: Optional[List[Union[SearchResultImages, Document]]] = None
+
+
+class SearchQueryDecomposition(BaseModel):
+    """Options for AI-driven search query decomposition."""
+
+    mode: Optional[Literal["auto"]] = "auto"
+    max_queries: Optional[int] = Field(default=None, alias="maxQueries")
+
+    model_config = {"populate_by_name": True}
+
+
+class SearchQueryPlan(BaseModel):
+    """Metadata and grouped results for auto or batch search execution."""
+
+    mode: Literal["auto", "batch"]
+    original_query: Optional[str] = Field(default=None, alias="originalQuery")
+    results_per_query: int = Field(alias="resultsPerQuery")
+    searches: List[SearchQueryPlanSearch]
+
+    model_config = {"populate_by_name": True}
+
+
 class MapDocument(Document):
     """A document from a map operation with URL and description."""
 
@@ -1035,10 +1065,12 @@ class Location(BaseModel):
 class SearchRequest(BaseModel):
     """Request for search operations."""
 
-    query: str
+    query: Union[str, List[str]]
     sources: Optional[List[SourceOption]] = None
     categories: Optional[List[CategoryOption]] = None
     limit: Optional[int] = 5
+    results_per_query: Optional[int] = None
+    query_decomposition: Optional[SearchQueryDecomposition] = None
     tbs: Optional[str] = None
     location: Optional[str] = None
     ignore_invalid_urls: Optional[bool] = None
@@ -1104,9 +1136,12 @@ SearchResult = LinkResult
 class SearchData(BaseModel):
     """Search results grouped by source type."""
 
+    model_config = {"populate_by_name": True}
+
     web: Optional[List[Union[SearchResultWeb, Document]]] = None
     news: Optional[List[Union[SearchResultNews, Document]]] = None
     images: Optional[List[Union[SearchResultImages, Document]]] = None
+    query_plan: Optional[SearchQueryPlan] = Field(default=None, alias="queryPlan")
 
 
 class SearchResponse(BaseResponse[SearchData]):

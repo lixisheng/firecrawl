@@ -13,6 +13,7 @@ from .types import (
     AgentWebhookConfig,
     SearchRequest,
     SearchData,
+    SearchQueryDecomposition,
     SourceOption,
     CrawlResponse,
     CrawlJob,
@@ -94,9 +95,11 @@ class AsyncFirecrawlClient:
     # Search
     async def search(
         self,
-        query: str,
+        query: Union[str, List[str]],
         **kwargs,
     ) -> SearchData:
+        if "query_decomposition" in kwargs and isinstance(kwargs["query_decomposition"], dict):
+            kwargs["query_decomposition"] = SearchQueryDecomposition(**kwargs["query_decomposition"])
         request = SearchRequest(query=query, **{k: v for k, v in kwargs.items() if v is not None})
         return await async_search.search(self.async_http_client, request)
 

@@ -33,3 +33,35 @@ content-type: application/json
   ],
   "limit": 5
 }
+
+### Search - Auto query decomposition
+# @name searchDecomposition
+POST {{baseUrl}}/v2/search HTTP/1.1
+Authorization: Bearer {{$dotenv TEST_API_KEY}}
+content-type: application/json
+
+{
+  "query": "best vector databases for multi-tenant retrieval systems",
+  "queryDecomposition": {
+    "mode": "auto",
+    "maxQueries": 4
+  },
+  "resultsPerQuery": 3,
+  "limit": 10
+}
+
+### Search - Batch query mode
+# @name searchBatch
+POST {{baseUrl}}/v2/search HTTP/1.1
+Authorization: Bearer {{$dotenv TEST_API_KEY}}
+content-type: application/json
+
+{
+  "query": [
+    "firecrawl search api",
+    "firecrawl batch scrape",
+    "firecrawl map endpoint"
+  ],
+  "resultsPerQuery": 2,
+  "limit": 10
+}

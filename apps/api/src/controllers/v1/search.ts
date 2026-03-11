@@ -150,6 +150,7 @@ export async function searchController(
       {
         query: req.body.query,
         limit: req.body.limit,
+        resultsPerQuery: req.body.limit,
         tbs: req.body.tbs,
         filter: req.body.filter,
         lang: req.body.lang,
