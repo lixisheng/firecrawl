@@ -385,6 +385,7 @@ FormatString = Literal[
     "json",
     "attributes",
     "branding",
+    "query",
     # snake_case versions (user-friendly)
     "raw_html",
     "change_tracking",
@@ -443,7 +444,7 @@ class AttributesFormat(Format):
     selectors: List[AttributeSelector]
 
 
-class QueryFormat(BaseModel):
+class QueryFormat(Format):
     """Configuration for query format - ask a question about the page content."""
 
     type: Literal["query"] = "query"
