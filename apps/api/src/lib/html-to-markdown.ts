@@ -10,6 +10,8 @@ import { convertHTMLToMarkdownWithHttpService } from "./html-to-markdown-client"
 import { postProcessMarkdown } from "@mendable/firecrawl-rs";
 import { shadowSimdConversion } from "./html-to-markdown-shadow";
 
+const SIMD_SHADOW_SAMPLE_RATE = 0.2; // 20% of traffic
+
 // TODO: add a timeout to the Go parser
 
 class GoMarkdownConverter {
@@ -74,7 +76,7 @@ export async function parseMarkdown(
         requestId,
       });
       markdownContent = await postProcessMarkdown(markdownContent);
-      setImmediate(() => shadowSimdConversion(html, markdownContent, contextLogger, requestId));
+      if (Math.random() < SIMD_SHADOW_SAMPLE_RATE) setImmediate(() => shadowSimdConversion(html, markdownContent, contextLogger, requestId));
       return markdownContent;
     } catch (error) {
       contextLogger.error(
@@ -95,7 +97,7 @@ export async function parseMarkdown(
       const converter = await GoMarkdownConverter.getInstance();
       let markdownContent = await converter.convertHTMLToMarkdown(html);
       markdownContent = await postProcessMarkdown(markdownContent);
-      setImmediate(() => shadowSimdConversion(html, markdownContent, contextLogger, requestId));
+      if (Math.random() < SIMD_SHADOW_SAMPLE_RATE) setImmediate(() => shadowSimdConversion(html, markdownContent, contextLogger, requestId));
       return markdownContent;
     }
   } catch (error) {
@@ -144,7 +146,7 @@ export async function parseMarkdown(
   try {
     let markdownContent = await turndownService.turndown(html);
     markdownContent = await postProcessMarkdown(markdownContent);
-    setImmediate(() => shadowSimdConversion(html, markdownContent, contextLogger, requestId));
+    if (Math.random() < SIMD_SHADOW_SAMPLE_RATE) setImmediate(() => shadowSimdConversion(html, markdownContent, contextLogger, requestId));
     return markdownContent;
   } catch (error) {
     contextLogger.error("Error converting HTML to Markdown", { error });
