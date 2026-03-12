@@ -4,10 +4,7 @@ import * as marked from "marked";
 import { robustFetch } from "../../lib/fetch";
 import { z } from "zod";
 import path from "node:path";
-import {
-  runSelfHostedOCRExperiment,
-  createMUv1Deferred,
-} from "./selfHostedOCR";
+import { runSelfHostedOCRExperiment } from "./selfHostedOCR";
 import {
   getPdfResultFromCache,
   savePdfResultToCache,
@@ -105,9 +102,6 @@ export async function scrapePDFWithRunPodMU(
     })();
   }
 
-  const muV1Deferred = createMUv1Deferred();
-  runSelfHostedOCRExperiment(meta, base64Content, muV1Deferred, maxPages);
-
   const muV1StartedAt = Date.now();
   const podStart = await robustFetch({
     url: "https://api.runpod.ai/v2/" + config.RUNPOD_MU_POD_ID + "/runsync",
@@ -180,7 +174,6 @@ export async function scrapePDFWithRunPodMU(
       url: meta.rewrittenUrl ?? meta.url,
       pagesProcessed,
     });
-    muV1Deferred.reject(new Error("RunPod MU failed to parse PDF"));
     throw new Error("RunPod MU failed to parse PDF");
   }
 
@@ -191,7 +184,6 @@ export async function scrapePDFWithRunPodMU(
       url: meta.rewrittenUrl ?? meta.url,
       pagesProcessed,
     });
-    muV1Deferred.reject(new Error("RunPod MU returned no result"));
     throw new Error("RunPod MU returned no result");
   }
 
@@ -218,7 +210,12 @@ export async function scrapePDFWithRunPodMU(
       url: meta.rewrittenUrl ?? meta.url,
       pagesProcessed,
     });
-    muV1Deferred.resolve({ markdown: result.markdown, durationMs });
+    runSelfHostedOCRExperiment(
+      meta,
+      base64Content,
+      { markdown: result.markdown, durationMs },
+      maxPages,
+    );
   }
 
   return processorResult;
