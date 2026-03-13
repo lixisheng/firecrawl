@@ -5,6 +5,9 @@ import { DocumentConverter, DocumentType } from "@mendable/firecrawl-rs";
 import type { Response } from "undici";
 import { DocumentAntibotError, DocumentPrefetchFailed } from "../../error";
 import { readFile, unlink } from "node:fs/promises";
+import { emitNativeLogs } from "../../../../lib/native-logging";
+import { withSpan, setSpanAttributes } from "../../../../lib/otel-tracer";
+import { captureExceptionWithZdrCheck } from "../../../../services/sentry";
 
 const converter = new DocumentConverter();
 
@@ -140,10 +143,39 @@ export async function scrapeDocument(meta: Meta): Promise<EngineScrapeResult> {
       getDocumentTypeFromContentType(response.headers.get("content-type")) ??
       getDocumentTypeFromUrl(response.url);
 
-    const html = await converter.convertBufferToHtml(
-      new Uint8Array(buffer),
-      documentType,
-    );
+    const nativeCtx = { scrapeId: meta.id, url: meta.rewrittenUrl ?? meta.url };
+    const html = await withSpan("native.document.convert", async (span) => {
+      try {
+        const result = converter.convertBufferToHtmlTraced(
+          new Uint8Array(buffer),
+          documentType,
+          nativeCtx,
+        );
+        setSpanAttributes(span, {
+          "native.module": "document",
+          "native.document_type": DocumentType[documentType],
+          "native.html_len": result.html.length,
+        });
+        emitNativeLogs(result.logs, meta.logger, "document.convert");
+        return result.html;
+      } catch (error) {
+        meta.logger.error("Native document conversion failed", {
+          error,
+          documentType: DocumentType[documentType],
+          url: response.url,
+        });
+        captureExceptionWithZdrCheck(error, {
+          extra: {
+            zeroDataRetention: meta.internalOptions.zeroDataRetention ?? false,
+            scrapeId: meta.id,
+            teamId: meta.internalOptions.teamId,
+            url: meta.rewrittenUrl ?? meta.url,
+            documentType: DocumentType[documentType],
+          },
+        });
+        throw error;
+      }
+    });
 
     return {
       url: response.url,
