@@ -8,8 +8,7 @@ use std::collections::HashMap;
 
 use super::client::Client;
 use super::scrape::ParserConfig;
-use super::types::{Format, ProxyType};
-use super::types::Document;
+use super::types::{AttributeSelector, ChangeTrackingOptions, Document, Format, JsonOptions};
 use crate::FirecrawlError;
 
 /// Uploaded file payload for the `/v2/parse` endpoint.
@@ -72,6 +71,14 @@ struct ParseResponse {
     warning: Option<String>,
 }
 
+/// Proxy settings accepted by `/v2/parse`.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ParseProxyType {
+    Basic,
+    Auto,
+}
+
 /// Options accepted by the `/v2/parse` endpoint.
 ///
 /// This intentionally omits scrape-only fields that `/v2/parse` rejects
@@ -100,10 +107,12 @@ pub struct ParseOptions {
     pub remove_base64_images: Option<bool>,
     /// Fast mode.
     pub fast_mode: Option<bool>,
+    /// Mock fixture id to use.
+    pub use_mock: Option<String>,
     /// Block ads.
     pub block_ads: Option<bool>,
     /// Proxy type.
-    pub proxy: Option<ProxyType>,
+    pub proxy: Option<ParseProxyType>,
     /// Maximum cache age in seconds.
     pub max_age: Option<u32>,
     /// Minimum cache age in seconds.
@@ -116,6 +125,12 @@ pub struct ParseOptions {
     pub origin: Option<String>,
     /// Zero data retention mode.
     pub zero_data_retention: Option<bool>,
+    /// JSON extraction options.
+    pub json_options: Option<JsonOptions>,
+    /// Change tracking options.
+    pub change_tracking_options: Option<ChangeTrackingOptions>,
+    /// Attribute selectors for extraction.
+    pub attribute_selectors: Option<Vec<AttributeSelector>>,
 }
 
 impl Client {
@@ -171,7 +186,10 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/v2/parse")
-            .match_header("content-type", Matcher::Regex("multipart/form-data".to_string()))
+            .match_header(
+                "content-type",
+                Matcher::Regex("multipart/form-data".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(

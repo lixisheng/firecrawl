@@ -21,30 +21,66 @@ function decodeHtmlBuffer(
 } {
   let text = buf.toString("utf8");
 
-  const headerCharset = (contentType?.match(
+  const headerCharsetRaw = (contentType?.match(
     /charset\s*=\s*["']?([^;"'\s]+)/i,
   ) ?? [])[1];
+  const headerCharset = headerCharsetRaw?.trim();
 
-  const metaCharset = (text.match(
+  const metaCharsetRaw = (text.match(
     /<meta\b[^>]*charset\s*=\s*["']?([^"'\s\/>]+)/i,
   ) ?? [])[1];
+  const metaCharset = metaCharsetRaw?.trim();
 
-  const charset = headerCharset?.trim() || metaCharset?.trim();
-  const charsetSource: "header" | "meta" | undefined = headerCharset
-    ? "header"
-    : metaCharset
-      ? "meta"
-      : undefined;
-
-  if (charset) {
+  if (headerCharset) {
     try {
-      text = new TextDecoder(charset).decode(buf);
-    } catch (decodeError) {
-      return { text, charset, charsetSource, decodeError };
+      return {
+        text: new TextDecoder(headerCharset).decode(buf),
+        charset: headerCharset,
+        charsetSource: "header",
+      };
+    } catch (headerDecodeError) {
+      // If header charset is invalid/unsupported, fall back to meta charset.
+      if (
+        metaCharset &&
+        metaCharset.toLowerCase() !== headerCharset.toLowerCase()
+      ) {
+        try {
+          return {
+            text: new TextDecoder(metaCharset).decode(buf),
+            charset: metaCharset,
+            charsetSource: "meta",
+          };
+        } catch {
+          // Keep original header decode error for logging and utf8 fallback.
+        }
+      }
+      return {
+        text,
+        charset: headerCharset,
+        charsetSource: "header",
+        decodeError: headerDecodeError,
+      };
     }
   }
 
-  return { text, charset, charsetSource };
+  if (metaCharset) {
+    try {
+      return {
+        text: new TextDecoder(metaCharset).decode(buf),
+        charset: metaCharset,
+        charsetSource: "meta",
+      };
+    } catch (decodeError) {
+      return {
+        text,
+        charset: metaCharset,
+        charsetSource: "meta",
+        decodeError,
+      };
+    }
+  }
+
+  return { text };
 }
 
 export async function scrapeURLWithFetch(

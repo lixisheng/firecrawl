@@ -1,4 +1,5 @@
 import asyncio
+from functools import partial
 import json
 from typing import Optional, Dict, Any, Tuple
 
@@ -30,11 +31,15 @@ async def _prepare_parse_request(
 
     request_data["origin"] = request_data.get("origin") or f"python-sdk@{version}"
     multipart_fields = {"options": json.dumps(request_data)}
-    multipart_files = await asyncio.to_thread(
-        _prepare_file_payload,
-        file,
-        filename,
-        content_type,
+    loop = asyncio.get_running_loop()
+    multipart_files = await loop.run_in_executor(
+        None,
+        partial(
+            _prepare_file_payload,
+            file,
+            filename=filename,
+            content_type=content_type,
+        ),
     )
     return multipart_fields, multipart_files
 

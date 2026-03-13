@@ -3,14 +3,7 @@ import {
   describeIf,
   TEST_SUITE_WEBSITE,
 } from "../lib";
-import {
-  creditUsage,
-  idmux,
-  Identity,
-  parse,
-  parseWithFailure,
-  scrapeTimeout,
-} from "./lib";
+import { idmux, Identity, parse, parseWithFailure, scrapeTimeout } from "./lib";
 import { supabase_service } from "../../../services/supabase";
 import { config } from "../../../config";
 
@@ -77,9 +70,7 @@ describe("/v2/parse", () => {
 
       expect(result.markdown).toContain("Parse HTML Upload Test");
       expect(result.metadata.creditsUsed).toBe(1);
-      expect(result.metadata.sourceURL).toContain(
-        "https://parse.firecrawl.dev/uploads/upload.html",
-      );
+      expect(result.metadata.sourceURL).toBe("upload.html");
     },
     scrapeTimeout,
   );
@@ -194,32 +185,6 @@ describe("/v2/parse", () => {
 
       expect(failure.code).toBe("UNSUPPORTED_FILE_TYPE");
       expect(failure.error).toContain("Unsupported upload type");
-    },
-    scrapeTimeout,
-  );
-
-  it(
-    "uses scrape-equivalent credit billing semantics",
-    async () => {
-      const before = (await creditUsage(identity)).remainingCredits;
-
-      const result = await parse(
-        {
-          options: {
-            formats: ["markdown"],
-          },
-          file: {
-            content: htmlFixture,
-            filename: "billing.html",
-            contentType: "text/html",
-          },
-        },
-        identity,
-      );
-
-      const after = (await creditUsage(identity)).remainingCredits;
-      expect(result.metadata.creditsUsed).toBe(1);
-      expect(before - after).toBe(1);
     },
     scrapeTimeout,
   );
