@@ -9,7 +9,7 @@
 use dotenvy::dotenv;
 use firecrawl::v2::{
     AgentOptions, BatchScrapeOptions, Client, CrawlOptions, Format, MapOptions, ParseFile,
-    ParseOptions, ScrapeOptions, SearchOptions, SitemapMode,
+    ParseFormat, ParseOptions, ScrapeOptions, SearchOptions, SitemapMode,
 };
 use serde_json::json;
 use std::env;
@@ -44,7 +44,7 @@ async fn test_v2_parse() {
     .with_content_type("text/html");
 
     let options = ParseOptions {
-        formats: Some(vec![Format::Markdown]),
+        formats: Some(vec![ParseFormat::Markdown]),
         ..Default::default()
     };
 

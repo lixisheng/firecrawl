@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable, Union, Literal, BinaryIO
 from .types import (
     ClientConfig,
+    ParseOptions,
     ScrapeOptions,
     Document,
     SearchRequest,
@@ -193,7 +194,7 @@ class FirecrawlClient:
         *,
         filename: Optional[str] = None,
         content_type: Optional[str] = None,
-        options: Optional[ScrapeOptions] = None,
+        options: Optional[ParseOptions] = None,
     ) -> Document:
         """
         Parse an uploaded file using the v2 parse endpoint.
@@ -202,7 +203,8 @@ class FirecrawlClient:
             file: File path, bytes, bytearray, or binary file-like object
             filename: Optional explicit filename (required for raw bytes without extension)
             content_type: Optional explicit MIME type
-            options: Scrape-compatible parse options
+            options: Parse-compatible options. Parse rejects change tracking and
+                browser-only options such as actions, wait_for, location, and mobile.
 
         Returns:
             Document

@@ -453,6 +453,7 @@ export type InternalOptions = {
   v1OriginalFormat?: "extract" | "json"; // Track original v1 format for backward compatibility
 
   isPreCrawl?: boolean; // Whether this scrape is part of a precrawl job
+  isParse?: boolean; // Whether this scrape originated from /v2/parse
   uploadedFile?: {
     buffer: Buffer;
     filename: string;

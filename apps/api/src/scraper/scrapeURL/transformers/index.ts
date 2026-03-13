@@ -177,6 +177,7 @@ async function deriveLinksFromHTML(
     rate > 0 && Math.random() <= rate && !!config.INDEXER_RABBITMQ_URL;
 
   const forwardToIndexer =
+    !meta.internalOptions.isParse &&
     !!meta.internalOptions.teamId &&
     !meta.internalOptions.teamId?.includes("robots-txt") &&
     !meta.internalOptions.teamId?.includes("sitemap") &&

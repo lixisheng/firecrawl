@@ -141,6 +141,15 @@ class FirecrawlClientTest {
         );
     }
 
+    @Test
+    void testParseOptionsRejectsChangeTrackingFormat() {
+        assertThrows(IllegalArgumentException.class, () ->
+                ParseOptions.builder()
+                        .formats(List.of("markdown", "changeTracking"))
+                        .build()
+        );
+    }
+
     // ================================================================
     // E2E TESTS (require FIRECRAWL_API_KEY)
     // ================================================================
@@ -229,7 +238,7 @@ class FirecrawlClientTest {
                 .contentType("text/html")
                 .build();
 
-        Document doc = client.parse(file, ScrapeOptions.builder()
+        Document doc = client.parse(file, ParseOptions.builder()
                 .formats(List.of("markdown"))
                 .build());
 

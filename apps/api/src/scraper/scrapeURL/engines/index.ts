@@ -499,6 +499,10 @@ const engineOptions: {
 };
 
 export function shouldUseIndex(meta: Meta) {
+  if (meta.internalOptions.isParse) {
+    return false;
+  }
+
   // Skip index if screenshot format has custom viewport or quality settings
   const screenshotFormat = hasFormatOfType(meta.options.formats, "screenshot");
   const hasCustomScreenshotSettings =
