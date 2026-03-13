@@ -57,6 +57,7 @@ class V2Proxy:
 
         if client_instance:
             self.scrape = client_instance.scrape
+            self.parse = client_instance.parse
             self.search = client_instance.search
             self.crawl = client_instance.crawl
             self.start_crawl = client_instance.start_crawl
@@ -129,6 +130,7 @@ class AsyncV2Proxy:
 
         if client_instance:
             self.scrape = client_instance.scrape
+            self.parse = client_instance.parse
             self.search = client_instance.search
             self.crawl = client_instance.crawl
             self.start_crawl = client_instance.start_crawl
@@ -221,6 +223,7 @@ class Firecrawl:
         self.v2 = V2Proxy(self._v2_client)
         
         self.scrape = self._v2_client.scrape
+        self.parse = self._v2_client.parse
         self.search = self._v2_client.search
         self.map = self._v2_client.map
 
@@ -293,6 +296,7 @@ class AsyncFirecrawl:
         # Expose v2 async surface directly on the top-level client for ergonomic access
         # Keep method names aligned with the sync client
         self.scrape = self._v2_client.scrape
+        self.parse = self._v2_client.parse
         self.search = self._v2_client.search
         self.map = self._v2_client.map
 

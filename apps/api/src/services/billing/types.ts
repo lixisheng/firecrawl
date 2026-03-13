@@ -7,6 +7,7 @@ export type BillingEndpoint =
   | "extract"
   | "llms_txt"
   | "map"
+  | "parse"
   | "scrape"
   | "search";
 

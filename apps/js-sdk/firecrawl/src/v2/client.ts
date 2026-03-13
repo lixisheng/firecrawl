@@ -1,5 +1,6 @@
 import { HttpClient } from "./utils/httpClient";
 import { scrape } from "./methods/scrape";
+import { parse as parseMethod } from "./methods/parse";
 import { search } from "./methods/search";
 import { map as mapMethod } from "./methods/map";
 import {
@@ -29,6 +30,8 @@ import {
 import { getConcurrency, getCreditUsage, getQueueStatus, getTokenUsage, getCreditUsageHistorical, getTokenUsageHistorical } from "./methods/usage";
 import type {
   Document,
+  ParseFile,
+  ParseOptions,
   ScrapeOptions,
   SearchData,
   SearchRequest,
@@ -128,6 +131,17 @@ export class FirecrawlClient {
   async scrape(url: string, options?: ScrapeOptions): Promise<Document>;
   async scrape(url: string, options?: ScrapeOptions): Promise<Document> {
     return scrape(this.http, url, options);
+  }
+
+  // Parse
+  /**
+   * Parse an uploaded file via the v2 parse endpoint.
+   * @param file File payload (data, filename, optional contentType).
+   * @param options Optional scrape-compatible parse options (formats, parsers, etc.).
+   * @returns Parsed document with requested formats.
+   */
+  async parse(file: ParseFile, options?: ParseOptions): Promise<Document> {
+    return parseMethod(this.http, file, options);
   }
 
   // Search

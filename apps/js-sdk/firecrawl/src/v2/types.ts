@@ -167,6 +167,22 @@ export interface ScrapeOptions {
   origin?: string;
 }
 
+export type ParseFileData =
+  | Blob
+  | File
+  | Buffer
+  | Uint8Array
+  | ArrayBuffer
+  | string;
+
+export interface ParseFile {
+  data: ParseFileData;
+  filename: string;
+  contentType?: string;
+}
+
+export type ParseOptions = ScrapeOptions;
+
 export interface WebhookConfig {
   url: string;
   headers?: Record<string, string>;

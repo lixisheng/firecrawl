@@ -6,6 +6,7 @@ import com.firecrawl.models.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -114,6 +115,29 @@ class FirecrawlClientTest {
         );
     }
 
+    @Test
+    void testParseFileBuilder() {
+        ParseFile file = ParseFile.builder()
+                .filename("upload.html")
+                .content("<html><body>hello</body></html>".getBytes(StandardCharsets.UTF_8))
+                .contentType("text/html")
+                .build();
+
+        assertEquals("upload.html", file.getFilename());
+        assertEquals("text/html", file.getContentType());
+        assertTrue(file.getContent().length > 0);
+    }
+
+    @Test
+    void testParseRequiresFile() {
+        FirecrawlClient client = FirecrawlClient.builder()
+                .apiKey("fc-test-key")
+                .build();
+        assertThrows(NullPointerException.class, () ->
+                client.parse(null)
+        );
+    }
+
     // ================================================================
     // E2E TESTS (require FIRECRAWL_API_KEY)
     // ================================================================
@@ -190,5 +214,24 @@ class FirecrawlClientTest {
         CreditUsage usage = client.getCreditUsage();
 
         assertNotNull(usage);
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "FIRECRAWL_API_KEY", matches = ".*\\S.*")
+    void testParseE2E() {
+        FirecrawlClient client = FirecrawlClient.fromEnv();
+        ParseFile file = ParseFile.builder()
+                .filename("java-parse-e2e.html")
+                .content("<!DOCTYPE html><html><body><h1>Java SDK Parse E2E</h1></body></html>".getBytes(StandardCharsets.UTF_8))
+                .contentType("text/html")
+                .build();
+
+        Document doc = client.parse(file, ScrapeOptions.builder()
+                .formats(List.of("markdown"))
+                .build());
+
+        assertNotNull(doc);
+        assertNotNull(doc.getMarkdown());
+        assertFalse(doc.getMarkdown().isEmpty());
     }
 }
