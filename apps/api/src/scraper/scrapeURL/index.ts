@@ -128,7 +128,7 @@ export type Meta = {
     | {
         url?: string;
         status: number;
-        body: string;
+        bodyBuffer: Buffer;
         proxyUsed: "basic" | "stealth";
         contentType?: string;
       }
@@ -374,7 +374,7 @@ async function buildMetaObject(
       fetchPrefetch = {
         url: prefetchUrl,
         status: 200,
-        body: buffer.toString("utf8"),
+        bodyBuffer: buffer,
         proxyUsed: "basic",
         contentType: contentType || "text/html; charset=utf-8",
       };
