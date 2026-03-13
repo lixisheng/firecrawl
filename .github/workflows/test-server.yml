@@ -259,29 +259,32 @@ jobs:
               else:
                   passed.append((suite, name, t))
 
+          def out(line, f):
+              print(line)
+              f.write(line + "\n")
+
           with open(summary, "a") as f:
-              f.write(f"## Test Report ({label})\n")
-              f.write("| Tests | Failures | Errors | Time |\n")
-              f.write("|-------|----------|--------|------|\n")
-              f.write(f"| {tests} | {failures} | {errors} | {time_s}s |\n\n")
+              out(f"## Test Report ({label})", f)
+              out("| Tests | Failures | Errors | Time |", f)
+              out("|-------|----------|--------|------|", f)
+              out(f"| {tests} | {failures} | {errors} | {time_s}s |", f)
+              out("", f)
 
               if failed:
-                  f.write("### Failed tests\n\n")
-                  f.write("| Suite | Test | Time |\n")
-                  f.write("|-------|------|------|\n")
+                  out("### Failed tests", f)
+                  out("", f)
                   for suite, name, t, msg in failed:
-                      f.write(f"| {suite} | **{name}** | {t}s |\n")
+                      out(f"  FAIL  {suite} > {name} ({t}s)", f)
                       if msg:
-                          f.write(f"| | > {msg} | |\n")
-                  f.write("\n")
+                          out(f"        {msg}", f)
+                  out("", f)
 
-              f.write("### All tests\n\n")
-              f.write("| Status | Suite | Test | Time |\n")
-              f.write("|--------|-------|------|------|\n")
-              for suite, name, t, msg in failed:
-                  f.write(f"| ❌ | {suite} | {name} | {t}s |\n")
+              out("### All tests", f)
+              out("", f)
+              for suite, name, t, _msg in failed:
+                  out(f"  FAIL  {suite} > {name} ({t}s)", f)
               for suite, name, t in passed:
-                  f.write(f"| ✅ | {suite} | {name} | {t}s |\n")
+                  out(f"  PASS  {suite} > {name} ({t}s)", f)
 
           if int(failures) > 0 or int(errors) > 0:
               print(f"::error::{failures} failure(s), {errors} error(s)")
