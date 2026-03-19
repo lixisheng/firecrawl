@@ -55,22 +55,15 @@ export function orgBucket(orgId: string): number {
  */
 export function isAutumnEnabled(orgId?: string): boolean {
   if (orgId && AUTUMN_BYPASS_ORG_IDS.has(orgId)) return true;
-  if (config.AUTUMN_EXPERIMENT !== "true") {
-    // No orgId yet — don't bail out if bypass orgs exist.
-    return !orgId && AUTUMN_BYPASS_ORG_IDS.size > 0;
-  }
+  if (config.AUTUMN_EXPERIMENT !== "true") return false;
   if (!orgId || config.AUTUMN_EXPERIMENT_PERCENT >= 100) return true;
   return orgBucket(orgId) < config.AUTUMN_EXPERIMENT_PERCENT;
 }
 
 export function isAutumnCheckEnabled(orgId?: string): boolean {
   if (orgId && AUTUMN_BYPASS_ORG_IDS.has(orgId)) return true;
-  if (
-    config.AUTUMN_CHECK_ENABLED !== "true" ||
-    config.AUTUMN_EXPERIMENT !== "true"
-  ) {
-    return !orgId && AUTUMN_BYPASS_ORG_IDS.size > 0;
-  }
+  if (config.AUTUMN_CHECK_ENABLED !== "true") return false;
+  if (config.AUTUMN_EXPERIMENT !== "true") return false;
   const percent = config.AUTUMN_CHECK_EXPERIMENT_PERCENT ?? 100;
   if (!orgId || percent >= 100) return true;
   return orgBucket(orgId) < percent;
@@ -381,11 +374,7 @@ export class AutumnService {
     value,
     properties,
   }: TrackCreditsParams): Promise<boolean | null> {
-    if (
-      !isAutumnCheckEnabled() ||
-      !autumnClient ||
-      this.isPreviewTeam(teamId)
-    ) {
+    if (!autumnClient || this.isPreviewTeam(teamId)) {
       return null;
     }
 
@@ -431,7 +420,7 @@ export class AutumnService {
     expiresAt,
     properties,
   }: LockCreditsParams): Promise<string | null> {
-    if (!isAutumnEnabled() || !autumnClient || this.isPreviewTeam(teamId)) {
+    if (!autumnClient || this.isPreviewTeam(teamId)) {
       return null;
     }
 
