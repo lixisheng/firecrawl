@@ -55,15 +55,25 @@ export function orgBucket(orgId: string): number {
  */
 export function isAutumnEnabled(orgId?: string): boolean {
   if (orgId && AUTUMN_BYPASS_ORG_IDS.has(orgId)) return true;
-  if (config.AUTUMN_EXPERIMENT !== "true") return false;
+  if (config.AUTUMN_EXPERIMENT !== "true") {
+    // When called without an orgId (early bail-out before the orgId is
+    // resolved), keep going if there are bypass orgs — one of them might
+    // be behind this request.  The second, orgId-aware call will make the
+    // real decision.
+    return !orgId && AUTUMN_BYPASS_ORG_IDS.size > 0;
+  }
   if (!orgId || config.AUTUMN_EXPERIMENT_PERCENT >= 100) return true;
   return orgBucket(orgId) < config.AUTUMN_EXPERIMENT_PERCENT;
 }
 
 export function isAutumnCheckEnabled(orgId?: string): boolean {
   if (orgId && AUTUMN_BYPASS_ORG_IDS.has(orgId)) return true;
-  if (config.AUTUMN_CHECK_ENABLED !== "true") return false;
-  if (config.AUTUMN_EXPERIMENT !== "true") return false;
+  if (
+    config.AUTUMN_CHECK_ENABLED !== "true" ||
+    config.AUTUMN_EXPERIMENT !== "true"
+  ) {
+    return !orgId && AUTUMN_BYPASS_ORG_IDS.size > 0;
+  }
   const percent = config.AUTUMN_CHECK_EXPERIMENT_PERCENT ?? 100;
   if (!orgId || percent >= 100) return true;
   return orgBucket(orgId) < percent;
