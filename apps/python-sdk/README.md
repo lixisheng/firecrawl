@@ -1,6 +1,6 @@
 # Firecrawl Python SDK
 
-The Firecrawl Python SDK is a library that allows you to easily scrape and crawl websites, and output the data in a format ready for use with language models (LLMs). It provides a simple and intuitive interface for interacting with the Firecrawl API.
+The Firecrawl Python SDK is a library that allows you to easily search, scrape, and interact with the web, and output the data in a format ready for use with language models (LLMs). It provides a simple and intuitive interface for the Firecrawl API.
 
 ## Installation
 
@@ -130,6 +130,31 @@ Use `map` to generate a list of URLs from a website. Options let you customize t
 # Map a website (v2):
 map_result = firecrawl.map('https://firecrawl.dev')
 print(map_result)
+```
+
+### Scrape-bound interactive browsing (v2)
+
+Use a scrape job ID to keep interacting with the replayed browser context:
+
+```python
+doc = firecrawl.scrape(
+  "https://example.com",
+  actions=[{"type": "click", "selector": "a[href='/pricing']"}],
+)
+
+scrape_job_id = doc.metadata_typed.scrape_id
+if not scrape_job_id:
+  raise RuntimeError("Missing scrape job id")
+
+run = firecrawl.interact(
+  scrape_job_id,
+  code="print(await page.url())",
+  language="python",
+  timeout=60,
+)
+print(run.stdout)
+
+firecrawl.stop_interaction(scrape_job_id)
 ```
 
 {/* ### Extracting Structured Data from Websites

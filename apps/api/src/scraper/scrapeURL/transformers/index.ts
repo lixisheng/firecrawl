@@ -8,15 +8,16 @@ import { extractMetadata } from "../lib/extractMetadata";
 import {
   performLLMExtract,
   performSummary,
-  performQuery,
   performCleanContent,
 } from "./llmExtract";
+import { performQuery } from "./query";
 import { uploadScreenshot } from "./uploadScreenshot";
 import { removeBase64Images } from "./removeBase64Images";
 import { performAgent } from "./agent";
 import { performAttributes } from "./performAttributes";
 
 import { deriveDiff } from "./diff";
+import { fetchAudio } from "./audio";
 import { useIndex, useSearchIndex } from "../../../services/index";
 import { sendDocumentToIndex } from "../engines/index/index";
 import { sendDocumentToSearchIndex } from "./sendToSearchIndex";
@@ -450,6 +451,15 @@ function coerceFieldsToFormats(meta: Meta, document: Document): Document {
     );
   }
 
+  const hasAudio = hasFormatOfType(meta.options.formats, "audio");
+  if (!hasAudio && document.audio !== undefined) {
+    delete document.audio;
+  } else if (hasAudio && document.audio === undefined) {
+    meta.logger.warn(
+      "Request had format: audio, but there was no audio field in the result.",
+    );
+  }
+
   if (!hasChangeTracking && document.changeTracking !== undefined) {
     meta.logger.warn(
       "Removed changeTracking from Document because it wasn't in formats -- this is extremely wasteful and indicates a bug.",
@@ -521,9 +531,10 @@ const transformerStack: Transformer[] = [
   performQuery,
   performAttributes,
   performAgent,
-  deriveDiff,
-  coerceFieldsToFormats,
   removeBase64Images,
+  deriveDiff,
+  fetchAudio,
+  coerceFieldsToFormats,
 ];
 
 export async function executeTransformers(

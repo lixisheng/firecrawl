@@ -131,6 +131,7 @@ class FirecrawlClient:
         proxy: Optional[str] = None,
         max_age: Optional[int] = None,
         store_in_cache: Optional[bool] = None,
+        profile: Optional[Dict[str, Any]] = None,
         integration: Optional[str] = None,
     ) -> Document:
         """
@@ -156,6 +157,7 @@ class FirecrawlClient:
             proxy: Proxy to use
             max_age: Maximum age of the cache
             store_in_cache: Whether to store the result in the cache
+            profile: Browser profile for persistent state (e.g. {"name": "my-profile", "saveChanges": True})
         Returns:
             Document
         """
@@ -180,10 +182,87 @@ class FirecrawlClient:
                 proxy=proxy,
                 max_age=max_age,
                 store_in_cache=store_in_cache,
+                profile=profile,
                 integration=integration,
             ).items() if v is not None}
-        ) if any(v is not None for v in [formats, headers, include_tags, exclude_tags, only_main_content, timeout, wait_for, mobile, parsers, actions, location, skip_tls_verification, remove_base64_images, fast_mode, use_mock, block_ads, proxy, max_age, store_in_cache, integration]) else None
+        ) if any(v is not None for v in [formats, headers, include_tags, exclude_tags, only_main_content, timeout, wait_for, mobile, parsers, actions, location, skip_tls_verification, remove_base64_images, fast_mode, use_mock, block_ads, proxy, max_age, store_in_cache, profile, integration]) else None
         return scrape_module.scrape(self.http_client, url, options)
+
+    def interact(
+        self,
+        job_id: str,
+        code: Optional[str] = None,
+        *,
+        prompt: Optional[str] = None,
+        language: Literal["python", "node", "bash"] = "node",
+        timeout: Optional[int] = None,
+        origin: Optional[str] = None,
+    ):
+        """
+        Interact with the browser session associated with a scrape job.
+
+        Either ``code`` or ``prompt`` must be provided.
+
+        Args:
+            job_id: Scrape job ID
+            code: Code to execute (optional if prompt is provided)
+            prompt: Natural-language instruction for the browser agent (optional if code is provided)
+            language: Programming language ("python", "node", or "bash")
+            timeout: Execution timeout in seconds (1-300)
+            origin: Optional request origin tag
+
+        Returns:
+            BrowserExecuteResponse with execution result
+        """
+        return scrape_module.interact(
+            self.http_client,
+            job_id,
+            code,
+            prompt=prompt,
+            language=language,
+            timeout=timeout,
+            origin=origin,
+        )
+
+    def stop_interaction(self, job_id: str):
+        """
+        Stop the interaction session associated with a scrape job.
+
+        Args:
+            job_id: Scrape job ID
+
+        Returns:
+            BrowserDeleteResponse
+        """
+        return scrape_module.stop_interaction(self.http_client, job_id)
+
+    def stop_interactive_browser(self, job_id: str):
+        """Deprecated alias for stop_interaction()."""
+        return self.stop_interaction(job_id)
+
+    def scrape_execute(
+        self,
+        job_id: str,
+        code: Optional[str] = None,
+        *,
+        prompt: Optional[str] = None,
+        language: Literal["python", "node", "bash"] = "node",
+        timeout: Optional[int] = None,
+        origin: Optional[str] = None,
+    ):
+        """Deprecated alias for interact()."""
+        return self.interact(
+            job_id,
+            code,
+            prompt=prompt,
+            language=language,
+            timeout=timeout,
+            origin=origin,
+        )
+
+    def delete_scrape_browser(self, job_id: str):
+        """Deprecated alias for stop_interaction()."""
+        return self.stop_interaction(job_id)
 
     def search(
         self,
@@ -243,6 +322,7 @@ class FirecrawlClient:
         crawl_entire_domain: bool = False,
         allow_external_links: bool = False,
         allow_subdomains: bool = False,
+        ignore_robots_txt: bool = False,
         delay: Optional[int] = None,
         max_concurrency: Optional[int] = None,
         webhook: Optional[Union[str, WebhookConfig]] = None,
@@ -271,6 +351,7 @@ class FirecrawlClient:
             crawl_entire_domain: Follow parent directory links
             allow_external_links: Follow external domain links
             allow_subdomains: Follow subdomains
+            ignore_robots_txt: Whether to ignore robots.txt rules
             delay: Delay in seconds between scrapes
             max_concurrency: Maximum number of concurrent scrapes
             webhook: Webhook configuration for notifications
@@ -305,6 +386,7 @@ class FirecrawlClient:
             "crawl_entire_domain": crawl_entire_domain,
             "allow_external_links": allow_external_links,
             "allow_subdomains": allow_subdomains,
+            "ignore_robots_txt": ignore_robots_txt,
             "delay": delay,
             "max_concurrency": max_concurrency,
             "webhook": webhook,
@@ -342,6 +424,7 @@ class FirecrawlClient:
         crawl_entire_domain: bool = False,
         allow_external_links: bool = False,
         allow_subdomains: bool = False,
+        ignore_robots_txt: bool = False,
         delay: Optional[int] = None,
         max_concurrency: Optional[int] = None,
         webhook: Optional[Union[str, WebhookConfig]] = None,
@@ -367,6 +450,7 @@ class FirecrawlClient:
             crawl_entire_domain: Follow parent directory links
             allow_external_links: Follow external domain links
             allow_subdomains: Follow subdomains
+            ignore_robots_txt: Whether to ignore robots.txt rules
             delay: Delay in seconds between scrapes
             max_concurrency: Maximum number of concurrent scrapes
             webhook: Webhook configuration for notifications
@@ -374,7 +458,7 @@ class FirecrawlClient:
             regex_on_full_url: Apply includePaths/excludePaths regex to the full URL (including query parameters) instead of just the pathname
             deduplicate_similar_urls: Whether to deduplicate similar URLs during crawl (default: True)
             zero_data_retention: Whether to delete data after 24 hours
-            
+
         Returns:
             CrawlResponse with job information
             
@@ -397,6 +481,7 @@ class FirecrawlClient:
             "crawl_entire_domain": crawl_entire_domain,
             "allow_external_links": allow_external_links,
             "allow_subdomains": allow_subdomains,
+            "ignore_robots_txt": ignore_robots_txt,
             "delay": delay,
             "max_concurrency": max_concurrency,
             "webhook": webhook,

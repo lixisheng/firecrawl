@@ -32,6 +32,8 @@ pub enum Format {
     Attributes,
     /// Brand analysis of the page.
     Branding,
+    /// Audio extraction (MP3) from YouTube videos.
+    Audio,
 }
 
 /// Viewport dimensions for screenshots.
@@ -110,6 +112,17 @@ pub struct LocationConfig {
     pub country: Option<String>,
     /// List of preferred language codes.
     pub languages: Option<Vec<String>>,
+}
+
+/// Persistent browser profile for maintaining state across scrapes.
+#[serde_with::skip_serializing_none]
+#[derive(Deserialize, Serialize, Debug, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileConfig {
+    /// Profile name (1–128 characters).
+    pub name: String,
+    /// Whether to persist changes made during the session (defaults to true).
+    pub save_changes: Option<bool>,
 }
 
 /// Proxy type for scraping.
@@ -423,6 +436,8 @@ pub struct Document {
     pub images: Option<Vec<String>>,
     /// Screenshot URL or base64 data.
     pub screenshot: Option<String>,
+    /// Audio download URL (signed GCS link for MP3).
+    pub audio: Option<String>,
     /// Extracted attributes.
     pub attributes: Option<Vec<AttributeResult>>,
     /// Action results.

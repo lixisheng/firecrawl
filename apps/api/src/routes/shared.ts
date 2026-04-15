@@ -125,15 +125,13 @@ export function checkCreditsMiddleware(
 
       const requestedCredits = minimum ?? 1;
       const useAutumnCheck =
-        !!req.auth.org_id &&
-        isAutumnCheckEnabled(req.auth.org_id) &&
-        !req.acuc?.is_extract;
+        !!req.auth.org_id && isAutumnCheckEnabled(req.auth.org_id);
 
       const autumnProperties = {
         source: "checkCreditsMiddleware",
         path: req.path,
       };
-      const [legacyCheck, autumnAllowed] = await Promise.all([
+      const [legacyCheck, autumnResult] = await Promise.all([
         checkTeamCredits(req.acuc ?? null, req.auth.team_id, requestedCredits),
         useAutumnCheck
           ? autumnService.checkCredits({
@@ -145,14 +143,15 @@ export function checkCreditsMiddleware(
       ]);
       let { success, remainingCredits, chunk } = legacyCheck;
 
-      if (autumnAllowed !== null) {
+      if (autumnResult !== null) {
         const dryRun = isAutumnCheckDryRun();
-        if (autumnAllowed !== legacyCheck.success) {
+        if (autumnResult.allowed !== legacyCheck.success) {
           logger.warn("Autumn check result diverged from legacy credit gate", {
             teamId: req.auth.team_id,
             path: req.path,
             requestedCredits,
-            autumnAllowed,
+            autumnAllowed: autumnResult.allowed,
+            autumnRemaining: autumnResult.remaining,
             legacyAllowed: legacyCheck.success,
             dryRun,
           });
@@ -162,13 +161,14 @@ export function checkCreditsMiddleware(
             teamId: req.auth.team_id,
             path: req.path,
             requestedCredits,
-            autumnAllowed,
+            autumnAllowed: autumnResult.allowed,
+            autumnRemaining: autumnResult.remaining,
             legacyAllowed: legacyCheck.success,
           });
         } else {
-          success = autumnAllowed;
+          success = autumnResult.allowed;
+          remainingCredits = autumnResult.remaining;
         }
-        remainingCredits = legacyCheck.remainingCredits;
       }
 
       if (chunk) {
@@ -177,7 +177,7 @@ export function checkCreditsMiddleware(
       req.account = { remainingCredits };
       if (!success) {
         if (
-          !minimum &&
+          !_minimum &&
           req.body &&
           (req.body as any).limit !== undefined &&
           remainingCredits > 0

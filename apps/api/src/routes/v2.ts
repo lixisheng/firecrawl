@@ -50,11 +50,16 @@ import {
   browserListController,
   browserWebhookDestroyedController,
 } from "../controllers/v2/browser";
+import { activityController } from "../controllers/v1/activity";
 import { agentSignupController } from "../controllers/v2/agent-signup";
 import {
   agentSignupConfirmController,
   agentSignupBlockController,
 } from "../controllers/v2/agent-signup-confirm";
+import {
+  scrapeInteractController,
+  scrapeStopInteractiveBrowserController,
+} from "../controllers/v2/scrape-browser";
 
 expressWs(express());
 
@@ -204,6 +209,20 @@ v2Router.get(
 );
 
 v2Router.post(
+  "/scrape/:jobId/interact",
+  authMiddleware(RateLimiterMode.BrowserExecute),
+  validateJobIdParam,
+  wrap(scrapeInteractController),
+);
+
+v2Router.delete(
+  "/scrape/:jobId/interact",
+  authMiddleware(RateLimiterMode.BrowserExecute),
+  validateJobIdParam,
+  wrap(scrapeStopInteractiveBrowserController),
+);
+
+v2Router.post(
   "/batch/scrape",
   authMiddleware(RateLimiterMode.Scrape),
   countryCheck,
@@ -343,25 +362,25 @@ v2Router.delete(
 
 v2Router.get(
   "/team/credit-usage",
-  authMiddleware(RateLimiterMode.CrawlStatus),
+  authMiddleware(RateLimiterMode.Account),
   wrap(creditUsageController),
 );
 
 v2Router.get(
   "/team/credit-usage/historical",
-  authMiddleware(RateLimiterMode.CrawlStatus),
+  authMiddleware(RateLimiterMode.Account),
   wrap(creditUsageHistoricalController),
 );
 
 v2Router.get(
   "/team/token-usage",
-  authMiddleware(RateLimiterMode.ExtractStatus),
+  authMiddleware(RateLimiterMode.Account),
   wrap(tokenUsageController),
 );
 
 v2Router.get(
   "/team/token-usage/historical",
-  authMiddleware(RateLimiterMode.ExtractStatus),
+  authMiddleware(RateLimiterMode.Account),
   wrap(tokenUsageHistoricalController),
 );
 
@@ -373,8 +392,14 @@ v2Router.get(
 
 v2Router.get(
   "/team/queue-status",
-  authMiddleware(RateLimiterMode.CrawlStatus),
+  authMiddleware(RateLimiterMode.Account),
   wrap(queueStatusController),
+);
+
+v2Router.get(
+  "/team/activity",
+  authMiddleware(RateLimiterMode.Account),
+  wrap(activityController),
 );
 
 v2Router.post(
@@ -409,7 +434,7 @@ v2Router.post(
 );
 
 // Agent signup routes (public, no auth required — rate limiting is handled inside the controller)
-v2Router.post("/agent-signup", wrap(agentSignupController));
+// v2Router.post("/agent-signup", wrap(agentSignupController));
 v2Router.post("/agent-signup/confirm", wrap(agentSignupConfirmController));
 v2Router.post("/agent-signup/block", wrap(agentSignupBlockController));
 

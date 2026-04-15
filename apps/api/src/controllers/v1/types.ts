@@ -527,6 +527,7 @@ const baseScrapeOptions = z.strictObject({
   __searchPreviewToken: z.string().optional(),
   __experimental_omce: z.boolean().prefault(false).optional(),
   __experimental_omceDomain: z.string().optional(),
+  __forceFirePDF: z.boolean().prefault(false).optional(),
 });
 
 const fire1RefineOpts = {
@@ -1263,6 +1264,7 @@ export type AuthCreditUsageChunk = {
     scrapeAgentPreview?: number;
     browser?: number;
     browserExecute?: number;
+    account?: number;
   };
   concurrency: number;
   flags: TeamFlags;
@@ -1293,6 +1295,7 @@ export type TeamFlags = {
   browserBeta?: boolean;
   bypassCreditChecks?: boolean;
   debugBranding?: boolean;
+  maxBrowserSessions?: number;
 } | null;
 
 export type AuthCreditUsageChunkFromTeam = Omit<
