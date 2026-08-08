@@ -5,6 +5,7 @@ import { withSpan, setSpanAttributes } from "../../lib/otel-tracer";
 import { captureExceptionWithZdrCheck } from "../../services/sentry";
 
 import {
+  applyScrapeOptionsDefaults,
   type Document,
   getPDFMaxPages,
   scrapeOptions,
@@ -40,8 +41,8 @@ import {
   PDFOCRRequiredError,
   IndexMissError,
   NoCachedDataError,
+  LockdownMissError,
   DNSResolutionError,
-  ZDRViolationError,
   PDFPrefetchFailed,
   DocumentPrefetchFailed,
   FEPageLoadFailed,
@@ -51,11 +52,13 @@ import {
   ProxySelectionError,
   ScrapeRetryLimitError,
   BrandingNotSupportedError,
+  XTwitterConfigurationError,
 } from "./error";
 import { ScrapeRetryTracker } from "./retryTracker";
 import { executeTransformers } from "./transformers";
 import { LLMRefusalError } from "./transformers/llmExtract";
 import { urlSpecificParams } from "./lib/urlSpecificParams";
+import { shouldCheckRobots } from "./shouldCheckRobots";
 import { loadMock, MockState } from "./lib/mock";
 import { CostTracking } from "../../lib/cost-tracking";
 import { getEngineForUrl } from "../WebScraper/utils/engine-forcing";
@@ -79,17 +82,57 @@ import {
 import { htmlTransform } from "./lib/removeUnwantedElements";
 import { postprocessors } from "./postprocessors";
 import { rewriteUrl } from "./lib/rewriteUrl";
+import {
+  DOCUMENT_EXTENSIONS,
+  documentContentTypeFromExtension,
+  documentExtensionFromContentType,
+  documentExtensionFromUrlPath,
+} from "../../lib/document-formats";
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import type { ExchangeScrapeMetadata } from "../../lib/exchange";
+import {
+  checkUrl,
+  type ThreatCheckDedup,
+  type ThreatDecision,
+  type ThreatProtectionPolicy,
+} from "../../lib/threat-protection";
+import { UnsafeDomainBlockedError } from "../../lib/threat-protection/error";
+import { canonicalizeUrl } from "../../lib/threat-protection/providers/web-risk/canonicalize";
 
 export type ScrapeUrlResponse =
   | {
       success: true;
       document: Document;
       unsupportedFeatures?: Set<FeatureFlag>;
+      exchange?: ExchangeScrapeMetadata;
+      /**
+       * Threat protection decisions made for this scrape (initial domain
+       * check + any redirect re-checks, in order). Read by the billing layer
+       * (`providerConsulted` drives +2/+3 credits) and the security-logging
+       * layer. Only set when a threat protection policy was active.
+       */
+      threatDecisions?: ThreatDecision[];
     }
   | {
       success: false;
       error: any;
+      threatDecisions?: ThreatDecision[];
     };
+
+export type BrowserCookie = {
+  name: string;
+  value: string;
+  domain?: string;
+  path?: string;
+  expires?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: string;
+  [key: string]: unknown;
+};
 
 export type Meta = {
   id: string;
@@ -121,9 +164,22 @@ export type Meta = {
       }
     | null
     | undefined; // undefined: no prefetch yet, null: prefetch came back empty
+  fetchPrefetch:
+    | {
+        url?: string;
+        status: number;
+        bodyBuffer: Buffer;
+        proxyUsed: "basic" | "stealth";
+        contentType?: string;
+      }
+    | null
+    | undefined; // undefined: no prefetch yet, null: prefetch came back empty
   costTracking: CostTracking;
   winnerEngine?: Engine;
   abortHandle?: NodeJS.Timeout;
+  audioCookies?: BrowserCookie[];
+  /** Threat protection decisions made during this scrape, in order (mutable, like logs). */
+  threatDecisions: ThreatDecision[];
 };
 
 function buildFeatureFlags(
@@ -133,7 +189,13 @@ function buildFeatureFlags(
 ): Set<FeatureFlag> {
   const flags: Set<FeatureFlag> = new Set();
 
-  if (options.actions !== undefined) {
+  // Lockdown forces index-only engines and ignores every request-time feature.
+  // Return empty so the fallback threshold never filters index engines out.
+  if (options.lockdown) {
+    return flags;
+  }
+
+  if (options.actions !== undefined && options.actions.length > 0) {
     flags.add("actions");
   }
 
@@ -147,6 +209,14 @@ function buildFeatureFlags(
 
   if (hasFormatOfType(options.formats, "branding")) {
     flags.add("branding");
+  }
+
+  if (hasFormatOfType(options.formats, "audio")) {
+    flags.add("audio");
+  }
+
+  if (hasFormatOfType(options.formats, "video")) {
+    flags.add("video");
   }
 
   if (options.waitFor !== 0) {
@@ -181,19 +251,7 @@ function buildFeatureFlags(
   const lowerPath = urlO.pathname.toLowerCase();
 
   // Check for document types first (they take precedence over PDF)
-  const isDocument =
-    lowerPath.endsWith(".docx") ||
-    lowerPath.endsWith(".odt") ||
-    lowerPath.endsWith(".rtf") ||
-    lowerPath.endsWith(".xlsx") ||
-    lowerPath.endsWith(".xls") ||
-    lowerPath.includes(".docx/") ||
-    lowerPath.includes(".odt/") ||
-    lowerPath.includes(".rtf/") ||
-    lowerPath.includes(".xlsx/") ||
-    lowerPath.includes(".xls/");
-
-  if (isDocument) {
+  if (documentExtensionFromUrlPath(lowerPath) !== null) {
     flags.add("document");
   } else if (lowerPath.endsWith(".pdf") || lowerPath.includes(".pdf/")) {
     // Only add PDF flag if it's not a document
@@ -212,6 +270,51 @@ function buildFeatureFlags(
 // The meta object is usually immutable, except for the logs array, and in edge cases (e.g. a new feature is suddenly required)
 // Having a meta object that is treated as immutable helps the code stay clean and easily tracable,
 // while also retaining the benefits that WebScraper had from its OOP design.
+const HTML_EXTENSIONS = new Set([".html", ".htm", ".xhtml"]);
+
+async function writeUploadedFileToTemp(
+  uploadedFilename: string,
+  uploadedBuffer: Buffer,
+  fallbackExtension: string,
+): Promise<string> {
+  const ext = path.extname(uploadedFilename).toLowerCase() || fallbackExtension;
+  const safeExt = ext.startsWith(".") ? ext : `.${ext}`;
+  const tempFilePath = path.join(
+    tmpdir(),
+    `parse-upload-${randomUUID()}${safeExt}`,
+  );
+  await writeFile(tempFilePath, uploadedBuffer);
+  return tempFilePath;
+}
+
+function isPdfUpload(filename: string, contentType?: string): boolean {
+  const ext = path.extname(filename).toLowerCase();
+  const normalizedType = contentType?.toLowerCase() ?? "";
+  return (
+    ext === ".pdf" ||
+    normalizedType === "application/pdf" ||
+    normalizedType.startsWith("application/pdf;")
+  );
+}
+
+function isDocumentUpload(filename: string, contentType?: string): boolean {
+  const ext = path.extname(filename).toLowerCase();
+  return (
+    DOCUMENT_EXTENSIONS.has(ext) ||
+    documentExtensionFromContentType(contentType) !== null
+  );
+}
+
+function isHtmlUpload(filename: string, contentType?: string): boolean {
+  const ext = path.extname(filename).toLowerCase();
+  const normalizedType = contentType?.toLowerCase() ?? "";
+  return (
+    HTML_EXTENSIONS.has(ext) ||
+    normalizedType.includes("text/html") ||
+    normalizedType.includes("application/xhtml+xml")
+  );
+}
+
 async function buildMetaObject(
   id: string,
   url: string,
@@ -257,19 +360,64 @@ async function buildMetaObject(
         )
       : undefined;
 
+  let pdfPrefetch: Meta["pdfPrefetch"] = undefined;
+  let documentPrefetch: Meta["documentPrefetch"] = undefined;
+  let fetchPrefetch: Meta["fetchPrefetch"] = undefined;
+
+  if (internalOptions.uploadedFile) {
+    const { filename, buffer, contentType } = internalOptions.uploadedFile;
+    const prefetchUrl = rewriteUrl(url) ?? url;
+
+    if (isPdfUpload(filename, contentType)) {
+      const filePath = await writeUploadedFileToTemp(filename, buffer, ".pdf");
+      pdfPrefetch = {
+        filePath,
+        status: 200,
+        url: prefetchUrl,
+        proxyUsed: "basic",
+        contentType: contentType || "application/pdf",
+      };
+    } else if (isDocumentUpload(filename, contentType)) {
+      const ext = path.extname(filename).toLowerCase();
+      const fallbackExtension =
+        ext && DOCUMENT_EXTENSIONS.has(ext) ? ext : ".docx";
+      const filePath = await writeUploadedFileToTemp(
+        filename,
+        buffer,
+        fallbackExtension,
+      );
+      documentPrefetch = {
+        filePath,
+        status: 200,
+        url: prefetchUrl,
+        proxyUsed: "basic",
+        contentType:
+          contentType ||
+          documentContentTypeFromExtension(fallbackExtension) ||
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      };
+    } else if (isHtmlUpload(filename, contentType)) {
+      fetchPrefetch = {
+        url: prefetchUrl,
+        status: 200,
+        bodyBuffer: buffer,
+        proxyUsed: "basic",
+        contentType: contentType || "text/html; charset=utf-8",
+      };
+    } else {
+      throw new UnsupportedFileError(
+        contentType || path.extname(filename) || "unknown",
+      );
+    }
+  }
+
+  const effectiveOptions = applyScrapeOptionsDefaults(options);
+
   return {
     id,
     url,
     rewrittenUrl: rewriteUrl(url),
-    options: {
-      ...options,
-      skipTlsVerification:
-        options.skipTlsVerification ??
-        ((options.headers && Object.keys(options.headers).length > 0) ||
-        (options.actions && options.actions.length > 0)
-          ? false
-          : true),
-    },
+    options: effectiveOptions,
     internalOptions,
     logger,
     abortHandle,
@@ -286,14 +434,16 @@ async function buildMetaObject(
           }
         : undefined,
     ),
-    featureFlags: buildFeatureFlags(url, options, internalOptions),
+    featureFlags: buildFeatureFlags(url, effectiveOptions, internalOptions),
     mock:
       options.useMock !== undefined
         ? await loadMock(options.useMock, _logger)
         : null,
-    pdfPrefetch: undefined,
-    documentPrefetch: undefined,
+    pdfPrefetch,
+    documentPrefetch,
+    fetchPrefetch,
     costTracking,
+    threatDecisions: [],
   };
 }
 
@@ -317,6 +467,24 @@ export type InternalOptions = {
   bypassBilling?: boolean;
   zeroDataRetention?: boolean;
   teamFlags?: TeamFlags;
+  /** Team's org, snapshotted from the request ACUC at acceptance (same
+   * pattern as teamFlags). Rides the job payload so org-scoped blocklist
+   * checks work without re-fetching the chunk. Required so a payload
+   * builder cannot silently omit the org and skip org-scoped enforcement;
+   * pass null when the caller genuinely has no org (internal/system work). */
+  orgId: string | null;
+  /** Team's sold concurrency, snapshotted from the request ACUC at
+   * acceptance (same pattern as teamFlags). Rides the job payload so
+   * downstream engines (FirePDF async account context) never re-fetch. */
+  teamConcurrency?: number | null;
+
+  /**
+   * Effective threat protection policy for this scrape, resolved at the
+   * controller layer (org config + per-request override). When set (and mode
+   * is not "off"), the target domain is checked before any engine work, and
+   * redirect destinations are re-checked. Absent => zero enforcement overhead.
+   */
+  threatProtection?: ThreatProtectionPolicy;
 
   v1Agent?: ScrapeOptionsV1["agent"];
   v1JSONAgent?: Exclude<ScrapeOptionsV1["jsonOptions"], undefined>["agent"];
@@ -325,6 +493,13 @@ export type InternalOptions = {
 
   isPreCrawl?: boolean; // Whether this scrape is part of a precrawl job
   agentIndexOnly?: boolean; // Pre-confirmation agent key: serve from index only, never touch web/Fire Engine
+  isParse?: boolean; // Whether this scrape originated from /v2/parse
+  uploadedFile?: {
+    buffer: Buffer;
+    filename: string;
+    contentType?: string;
+    kind?: "html" | "pdf" | "document";
+  };
 };
 
 type EngineScrapeResultWithContext = {
@@ -357,9 +532,17 @@ async function scrapeURLLoopIter(
     );
     const hasJson = hasFormatOfType(meta.options.formats, "json");
     const hasSummary = hasFormatOfType(meta.options.formats, "summary");
+    const hasQuestion = hasFormatOfType(meta.options.formats, "question");
+    const hasHighlights = hasFormatOfType(meta.options.formats, "highlights");
     const hasQuery = hasFormatOfType(meta.options.formats, "query");
     const needsMarkdown =
-      hasMarkdown || hasChangeTracking || hasJson || hasSummary || hasQuery;
+      hasMarkdown ||
+      hasChangeTracking ||
+      hasJson ||
+      hasSummary ||
+      hasQuestion ||
+      hasHighlights ||
+      hasQuery;
 
     let checkMarkdown: string;
     const htmlSize = engineResult.html?.length ?? 0;
@@ -382,15 +565,18 @@ async function scrapeURLLoopIter(
         },
       );
       checkMarkdown = engineResult.html?.trim() ?? "";
+    } else if (engineResult.markdown?.trim()) {
+      checkMarkdown = engineResult.markdown.trim();
     } else {
       const requestId = meta.id || meta.internalOptions.crawlId;
+      const zeroDataRetention = meta.internalOptions.zeroDataRetention;
       checkMarkdown = await parseMarkdown(
         await htmlTransform(
           engineResult.html,
           meta.url,
           scrapeOptions.parse({ onlyMainContent: true }),
         ),
-        { logger: meta.logger, requestId },
+        { logger: meta.logger, requestId, zeroDataRetention },
       );
 
       if (checkMarkdown.trim().length === 0) {
@@ -400,7 +586,7 @@ async function scrapeURLLoopIter(
             meta.url,
             scrapeOptions.parse({ onlyMainContent: false }),
           ),
-          { logger: meta.logger, requestId },
+          { logger: meta.logger, requestId, zeroDataRetention },
         );
       }
     }
@@ -476,37 +662,20 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
       "engine.features": Array.from(meta.featureFlags).join(","),
     });
 
-    if (meta.internalOptions.zeroDataRetention) {
-      if (meta.featureFlags.has("screenshot")) {
-        throw new ZDRViolationError("screenshot");
-      }
-
-      if (meta.featureFlags.has("screenshot@fullScreen")) {
-        throw new ZDRViolationError("screenshot@fullScreen");
-      }
-
-      if (
-        meta.options.actions &&
-        meta.options.actions.find(x => x.type === "screenshot")
-      ) {
-        throw new ZDRViolationError("screenshot action");
-      }
-
-      if (
-        meta.options.actions &&
-        meta.options.actions.find(x => x.type === "pdf")
-      ) {
-        throw new ZDRViolationError("pdf action");
-      }
-    }
-
     // TODO: handle sitemap data, see WebScraper/index.ts:280
     // TODO: ScrapeEvents
 
     const fallbackList = await buildFallbackList(meta);
 
-    // Check if actions are requested but no engines support them
-    if (meta.featureFlags.has("actions")) {
+    // Check if actions are requested but no engines support them.
+    // Skip when the content was already prefetched (a browser engine already
+    // ran the actions and downloaded the file); the re-run only needs the
+    // document/pdf engine to parse it, which does not support actions.
+    if (
+      meta.featureFlags.has("actions") &&
+      meta.pdfPrefetch === undefined &&
+      meta.documentPrefetch === undefined
+    ) {
       if (
         fallbackList.length === 0 ||
         fallbackList.every(engine => engine.unsupportedFeatures.has("actions"))
@@ -626,7 +795,12 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
           break;
         } catch (error) {
           if (error instanceof WrappedEngineError) {
-            if (error.error instanceof EngineError) {
+            if (error.engine === "x-twitter") {
+              meta.logger.warn("X/Twitter scrape failed fatally.", {
+                error: error.error,
+              });
+              throw error.error;
+            } else if (error.error instanceof EngineError) {
               meta.logger.warn(
                 "Engine " + error.engine + " could not scrape the page.",
                 {
@@ -642,6 +816,15 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
                   error: error.error,
                 },
               );
+            } else if (error.error instanceof EngineUnsuccessfulError) {
+              // Deliberately silent. An engine declining the page is a normal
+              // waterfall outcome and is already recorded elsewhere: the
+              // success-factor check logs "deemed unsuccessful" with its reasoning,
+              // and engines that recognise the body as none of their business
+              // (pdf/document finding HTML) are preceded by "Scraping via X...".
+              // Logging again only duplicated that, ~48k lines/hour across all
+              // engines. Recognised here purely so it doesn't fall through to the
+              // catch-all branch and get reported as an unexpected error.
             } else if (
               error.error instanceof AddFeatureError ||
               error.error instanceof RemoveFeatureError ||
@@ -656,7 +839,8 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
               error.error instanceof PDFInsufficientTimeError ||
               error.error instanceof ProxySelectionError ||
               error.error instanceof NoCachedDataError ||
-              error.error instanceof AgentIndexOnlyError
+              error.error instanceof AgentIndexOnlyError ||
+              error.error instanceof XTwitterConfigurationError
             ) {
               throw error.error;
             } else if (error.error instanceof LLMRefusalError) {
@@ -746,6 +930,9 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
         "engine.no_engines_left": true,
         "engine.engines_attempted": enginesAttempted.join(","),
       });
+      if (meta.options.lockdown) {
+        throw new LockdownMissError();
+      }
       throw new NoEnginesLeftError(fallbackList.map(x => x.engine));
     }
 
@@ -761,6 +948,9 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
 
     meta.winnerEngine = result.engine;
     let engineResult: EngineScrapeResult = result.result;
+    meta.audioCookies = (
+      engineResult as { audioCookies?: BrowserCookie[] }
+    ).audioCookies;
 
     for (const postprocessor of postprocessors) {
       if (
@@ -794,7 +984,9 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
 
     let document: Document = {
       markdown: engineResult.markdown,
+      pages: engineResult.pages,
       rawHtml: engineResult.html,
+      json: engineResult.json,
       screenshot: engineResult.screenshot,
       actions: engineResult.actions,
       branding: engineResult.branding,
@@ -804,6 +996,9 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
         statusCode: engineResult.statusCode,
         error: engineResult.error,
         numPages: engineResult.pdfMetadata?.numPages,
+        ...(engineResult.pdfMetadata?.totalPages !== undefined
+          ? { totalPages: engineResult.pdfMetadata.totalPages }
+          : {}),
         ...(engineResult.pdfMetadata?.title
           ? { title: engineResult.pdfMetadata.title }
           : {}),
@@ -855,6 +1050,7 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
       success: true,
       document,
       unsupportedFeatures: result.unsupportedFeatures,
+      exchange: engineResult.exchange,
     };
   });
 }
@@ -892,6 +1088,39 @@ export async function scrapeURL(
 
     meta.logger.info("scrapeURL entered");
 
+    // Threat protection: check the target URL BEFORE any engine selection
+    // or outbound fetch. The policy is resolved at the controller layer and
+    // threaded through internalOptions; absent policy = zero overhead.
+    // The dedup map is scoped to this one scrape: the initial check and any
+    // redirect re-check on the same URL share a single scan (one fee); a
+    // redirect to a different URL is a second scan and bills a second fee
+    // (see calculateThreatScanCredits).
+    const threatPolicy = internalOptions.threatProtection;
+    const threatDedup: ThreatCheckDedup = new Map();
+    if (threatPolicy && threatPolicy.mode !== "off") {
+      const initialUrl = meta.rewrittenUrl ?? meta.url;
+      const decision = await checkUrl(initialUrl, threatPolicy, {
+        teamId: internalOptions.teamId,
+        dedup: threatDedup,
+      });
+      meta.threatDecisions.push(decision);
+      if (!decision.allowed) {
+        meta.logger.info("URL blocked by threat protection policy", {
+          url: initialUrl,
+          domain: decision.domain,
+          rule: decision.rule,
+        });
+        setSpanAttributes(span, {
+          "scrape.blocked_by_threat_protection": true,
+        });
+        return {
+          success: false,
+          error: new UnsafeDomainBlockedError(initialUrl, decision),
+          threatDecisions: meta.threatDecisions,
+        };
+      }
+    }
+
     if (meta.rewrittenUrl) {
       meta.logger.info("Rewriting URL");
       setSpanAttributes(span, {
@@ -905,7 +1134,7 @@ export async function scrapeURL(
       });
     }
 
-    if (internalOptions.teamFlags?.checkRobotsOnScrape) {
+    if (shouldCheckRobots(options, internalOptions)) {
       await withSpan("scrape.robots_check", async robotsSpan => {
         const urlToCheck = meta.rewrittenUrl || meta.url;
         meta.logger.info("Checking robots.txt", { url: urlToCheck });
@@ -1077,6 +1306,40 @@ export async function scrapeURL(
         }
       }
 
+      // Threat protection: if the scrape ended up on a different URL than
+      // requested (redirect), re-check the destination URL. This closes the
+      // "clean URL redirects to a blocked URL" bypass vector — including
+      // same-domain redirects onto a flagged path.
+      if (threatPolicy && threatPolicy.mode !== "off" && result.success) {
+        const initialUrl = meta.rewrittenUrl ?? meta.url;
+        const finalUrl = result.document.metadata.url;
+        if (
+          finalUrl &&
+          canonicalizeUrl(finalUrl) !== canonicalizeUrl(initialUrl)
+        ) {
+          const decision = await checkUrl(finalUrl, threatPolicy, {
+            teamId: internalOptions.teamId,
+            dedup: threatDedup,
+          });
+          meta.threatDecisions.push(decision);
+          if (!decision.allowed) {
+            meta.logger.info(
+              "Redirect destination blocked by threat protection policy",
+              {
+                url: finalUrl,
+                domain: decision.domain,
+                initialUrl,
+                rule: decision.rule,
+              },
+            );
+            setSpanAttributes(span, {
+              "scrape.blocked_by_threat_protection": true,
+            });
+            throw new UnsafeDomainBlockedError(finalUrl, decision);
+          }
+        }
+      }
+
       meta.logger.debug("scrapeURL metrics", {
         module: "scrapeURL/metrics",
         timeTaken: Date.now() - startTime,
@@ -1123,7 +1386,9 @@ export async function scrapeURL(
           result.success && result.document.metadata.cacheState === "hit",
       });
 
-      return result;
+      return meta.threatDecisions.length > 0
+        ? { ...result, threatDecisions: meta.threatDecisions }
+        : result;
     } catch (error) {
       // if (Object.values(meta.results).length > 0 && Object.values(meta.results).every(x => x.state === "error" && x.error instanceof FEPageLoadFailed)) {
       //   throw new FEPageLoadFailed();
@@ -1241,6 +1506,16 @@ export async function scrapeURL(
           error,
           retryStats: error.stats,
         });
+      } else if (error instanceof UnsafeDomainBlockedError) {
+        errorType = "UnsafeDomainBlockedError";
+        meta.logger.warn(
+          "scrapeURL: Domain blocked by threat protection policy",
+          {
+            error,
+            domain: error.domain,
+            rule: error.decision.rule,
+          },
+        );
       } else if (error instanceof AbortManagerThrownError) {
         errorType = "AbortManagerThrownError";
         throw error.inner;
@@ -1264,6 +1539,9 @@ export async function scrapeURL(
       return {
         success: false,
         error,
+        ...(meta.threatDecisions.length > 0
+          ? { threatDecisions: meta.threatDecisions }
+          : {}),
       };
     }
   });

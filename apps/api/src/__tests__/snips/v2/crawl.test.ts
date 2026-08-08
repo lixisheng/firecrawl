@@ -20,7 +20,7 @@ import {
   TEST_API_URL,
 } from "./lib";
 import request from "./lib";
-import { describe, it, expect } from "@jest/globals";
+import { describe, it, expect } from "vitest";
 
 let identity: Identity;
 
@@ -128,8 +128,7 @@ describe("Crawl tests", () => {
       expect(results.success).toBe(true);
       if (results.success) {
         for (const page of results.data) {
-          const pageUrl =
-            page.metadata.url ?? page.metadata.sourceURL ?? base;
+          const pageUrl = page.metadata.url ?? page.metadata.sourceURL ?? base;
           const normalized = normalizeUrlForCompare(pageUrl);
           expect(
             normalized === baseNormalized || sitemapUrls.has(normalized),
@@ -216,6 +215,44 @@ describe("Crawl tests", () => {
   //   },
   //   10 * scrapeTimeout,
   // );
+
+  concurrentIf(ALLOW_TEST_SUITE_WEBSITE)(
+    "crawl status returns createdAt, completedAt, and duration",
+    async () => {
+      const beforeCrawl = Date.now();
+
+      const results = await crawl(
+        {
+          url: base,
+          limit: 3,
+        },
+        identity,
+      );
+
+      const afterCrawl = Date.now();
+
+      expect(results.success).toBe(true);
+      if (results.success) {
+        expect(typeof results.createdAt).toBe("string");
+        expect(typeof results.completedAt).toBe("string");
+        expect(typeof results.duration).toBe("number");
+
+        const createdAtMs = new Date(results.createdAt!).getTime();
+        const completedAtMs = new Date(results.completedAt!).getTime();
+
+        expect(createdAtMs).not.toBeNaN();
+        expect(completedAtMs).not.toBeNaN();
+        expect(completedAtMs).toBeGreaterThanOrEqual(createdAtMs);
+        expect(createdAtMs).toBeGreaterThanOrEqual(beforeCrawl - 1000);
+        expect(completedAtMs).toBeLessThanOrEqual(afterCrawl + 1000);
+
+        expect(results.duration).toBeGreaterThanOrEqual(0);
+        const expectedDuration = (completedAtMs - createdAtMs) / 1000;
+        expect(Math.abs(results.duration! - expectedDuration)).toBeLessThan(1);
+      }
+    },
+    10 * scrapeTimeout,
+  );
 
   concurrentIf(ALLOW_TEST_SUITE_WEBSITE)(
     "delay parameter works",
@@ -438,7 +475,7 @@ describe("Crawl tests", () => {
         async () => {
           const res = await crawl(
             {
-              url: base,
+              url: new URL("/blog", base).href,
               prompt:
                 "Crawl everything including external links and subdomains",
               // Explicit options that should override the prompt
@@ -525,6 +562,31 @@ describe("Crawl tests", () => {
         expect(results.warning).toContain("robots.txt");
         expect(results.warning).toContain("/scrape endpoint");
       }
+    },
+    10 * scrapeTimeout,
+  );
+
+  concurrentIf(TEST_PRODUCTION)(
+    "accepts robotsUserAgent parameter",
+    async () => {
+      const robotsIdentity = await idmux({
+        name: "crawl/robotsUserAgent",
+        credits: 10000,
+        flags: { customRobotsAgent: "allowed" },
+      });
+
+      const results = await crawl(
+        {
+          url: base,
+          limit: 3,
+          robotsUserAgent: "MyCustomBot",
+        },
+        robotsIdentity,
+      );
+
+      expect(results.success).toBe(true);
+      expect(results.status).toBe("completed");
+      expect(results.completed).toBeGreaterThan(0);
     },
     10 * scrapeTimeout,
   );

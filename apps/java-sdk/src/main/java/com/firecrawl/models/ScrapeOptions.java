@@ -32,6 +32,10 @@ public class ScrapeOptions {
     @JsonProperty("maxAge")
     private Long maxAge;
     private Boolean storeInCache;
+    private Boolean lockdown;
+    @JsonProperty("redactPII")
+    private Boolean redactPII;
+    private AuditMetadata auditMetadata;
     private String integration;
 
     private ScrapeOptions() {}
@@ -53,6 +57,11 @@ public class ScrapeOptions {
     public String getProxy() { return proxy; }
     public Long getMaxAge() { return maxAge; }
     public Boolean getStoreInCache() { return storeInCache; }
+    public Boolean getLockdown() { return lockdown; }
+    @JsonProperty("redactPII")
+    public Boolean getRedactPII() { return redactPII; }
+    @JsonProperty("auditMetadata")
+    public AuditMetadata getAuditMetadata() { return auditMetadata; }
     public String getIntegration() { return integration; }
 
     public static Builder builder() { return new Builder(); }
@@ -76,6 +85,9 @@ public class ScrapeOptions {
         b.proxy = this.proxy;
         b.maxAge = this.maxAge;
         b.storeInCache = this.storeInCache;
+        b.lockdown = this.lockdown;
+        b.redactPII = this.redactPII;
+        b.auditMetadata = this.auditMetadata;
         b.integration = this.integration;
         return b;
     }
@@ -98,14 +110,17 @@ public class ScrapeOptions {
         private String proxy;
         private Long maxAge;
         private Boolean storeInCache;
+        private Boolean lockdown;
+        private Boolean redactPII;
+        private AuditMetadata auditMetadata;
         private String integration;
 
         private Builder() {}
 
         /**
          * Output formats to request. Accepts strings like "markdown", "html", "rawHtml",
-         * "links", "screenshot", "json", "audio", etc., or format configuration maps for
-         * advanced formats (e.g., JsonFormat, ScreenshotFormat).
+         * "links", "screenshot", "json", "audio", "video", etc., or format configuration maps/objects for
+         * advanced formats (e.g., JsonFormat, QuestionFormat, HighlightsFormat).
          */
         public Builder formats(List<Object> formats) { this.formats = formats; return this; }
 
@@ -157,6 +172,15 @@ public class ScrapeOptions {
         /** Whether to cache the result. */
         public Builder storeInCache(Boolean storeInCache) { this.storeInCache = storeInCache; return this; }
 
+        /** Lockdown mode: serve only previously cached results, never make outbound requests. */
+        public Builder lockdown(Boolean lockdown) { this.lockdown = lockdown; return this; }
+
+        /** Redact personally identifiable information from returned content. */
+        public Builder redactPII(Boolean redactPII) { this.redactPII = redactPII; return this; }
+
+        /** User attribution to include with SIEM logging events. */
+        public Builder auditMetadata(AuditMetadata auditMetadata) { this.auditMetadata = auditMetadata; return this; }
+
         /** Integration identifier. */
         public Builder integration(String integration) { this.integration = integration; return this; }
 
@@ -179,6 +203,9 @@ public class ScrapeOptions {
             o.proxy = this.proxy;
             o.maxAge = this.maxAge;
             o.storeInCache = this.storeInCache;
+            o.lockdown = this.lockdown;
+            o.redactPII = this.redactPII;
+            o.auditMetadata = this.auditMetadata;
             o.integration = this.integration;
             return o;
         }

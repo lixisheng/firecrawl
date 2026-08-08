@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { promises as fs } from "fs";
 import path from "path";
-import { generateText, tool, stepCountIs } from "ai";
+import { tool, stepCountIs } from "ai";
 import { logger as _logger } from "../logger";
 import { getModel } from "../generic-ai";
 import {
@@ -9,6 +9,12 @@ import {
   BrowserServiceExecResponse,
 } from "./browser-service-client";
 import { config } from "../../config";
+import {
+  generateText,
+  buildLangSmithProviderOptions,
+  traceInteract,
+  InteractTraceMetadata,
+} from "./langsmith";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -175,15 +181,53 @@ async function takeSnapshot(browserId: string): Promise<string> {
   }
 }
 
+/**
+ * Keep a single foregrounded content tab, closing agent-browser's stray
+ * about:blank tab (it safely falls back to the surviving tab).
+ */
+async function syncTabs(browserId: string): Promise<void> {
+  try {
+    await browserServiceRequest("POST", `/browsers/${browserId}/exec`, {
+      code: [
+        `const ctx = page.context();`,
+        `const pages = ctx.pages();`,
+        `if (pages.length > 1) {`,
+        `  const target = pages.find(p => { const u = p.url(); return u && u !== 'about:blank'; }) || pages[pages.length - 1];`,
+        `  for (const p of pages) { if (p !== target) await p.close().catch(() => {}); }`,
+        `  page = target;`,
+        `}`,
+        `await page.bringToFront();`,
+      ].join("\n"),
+      language: "node",
+      timeout: 5,
+      origin: "tab_sync",
+    });
+  } catch {}
+}
+
 // ---------------------------------------------------------------------------
 // Main agent — tool-calling loop via AI SDK
 // ---------------------------------------------------------------------------
+
+interface BrowserAgentTraceContext {
+  sessionId: string;
+  scrapeId: string;
+  teamId: string;
+  orgId?: string;
+  zeroDataRetention?: boolean;
+  scrapeUrl?: string;
+  targetUrl?: string;
+  scrapeWaitForMs?: number;
+  scrapeActions?: number;
+  scrapeOrigin?: string;
+}
 
 export async function executePromptViaBrowserAgent(
   prompt: string,
   browserId: string,
   stepTimeout: number,
   logger: typeof _logger,
+  trace?: BrowserAgentTraceContext,
 ): Promise<AgentResult> {
   const debugLog = new AgentDebugLog(browserId);
   debugLog.add(`=== AGENT RUN ===`);
@@ -191,6 +235,11 @@ export async function executePromptViaBrowserAgent(
   debugLog.add(`Browser: ${browserId}`);
   debugLog.add(`Prompt:  ${prompt}\n`);
   logger.info("Agent debug log", { path: debugLog.getPath() });
+
+  // Prime agent-browser and consolidate tabs first: its first command of a
+  // session spawns an about:blank tab that would otherwise get snapshotted.
+  await getCurrentUrl(browserId);
+  await syncTabs(browserId);
 
   const [initialSnapshot, initialUrl] = await Promise.all([
     takeSnapshot(browserId),
@@ -237,23 +286,7 @@ export async function executePromptViaBrowserAgent(
         const output = (result.stdout || result.result || "").trim();
 
         // Ensure only one tab exists and it's in the foreground for live view
-        try {
-          await browserServiceRequest("POST", `/browsers/${browserId}/exec`, {
-            code: [
-              `const ctx = page.context();`,
-              `const pages = ctx.pages();`,
-              `if (pages.length > 1) {`,
-              `  const target = pages.find(p => { const u = p.url(); return u && u !== 'about:blank'; }) || pages[pages.length - 1];`,
-              `  for (const p of pages) { if (p !== target) await p.close().catch(() => {}); }`,
-              `  page = target;`,
-              `}`,
-              `await page.bringToFront();`,
-            ].join("\n"),
-            language: "node",
-            timeout: 5,
-            origin: "tab_sync",
-          });
-        } catch {}
+        await syncTabs(browserId);
 
         const elapsed = Date.now() - start;
 
@@ -293,9 +326,33 @@ export async function executePromptViaBrowserAgent(
     },
   });
 
+  const langsmith = trace
+    ? buildLangSmithProviderOptions(
+        {
+          thread_id: trace.sessionId,
+          session_id: trace.sessionId,
+          scrape_id: trace.scrapeId,
+          team_id: trace.teamId,
+          org_id: trace.orgId,
+          browser_id: browserId,
+          mode: "prompt",
+          zeroDataRetention: trace.zeroDataRetention,
+          scrape_url: trace.scrapeUrl,
+          target_url: trace.targetUrl,
+          scrape_wait_for_ms: trace.scrapeWaitForMs,
+          scrape_actions: trace.scrapeActions,
+          scrape_origin: trace.scrapeOrigin,
+        } satisfies InteractTraceMetadata,
+        {
+          name: "interact:prompt",
+          extra: { prompt_length: prompt.length },
+        },
+      )
+    : undefined;
+
   try {
     const result = await generateText({
-      model: getModel("gemini-2.5-flash", "google"),
+      model: getModel("gemini-3.5-flash", "google"),
       system: SYSTEM_PROMPT,
       messages: [
         {
@@ -311,6 +368,12 @@ export async function executePromptViaBrowserAgent(
       tools: { browser: browserTool },
       stopWhen: stepCountIs(MAX_STEPS),
       temperature: 0,
+      // LangSmith's provider-options object is recognized by wrapAISDK but
+      // does not satisfy AI SDK's SharedV3ProviderOptions shape, hence the
+      // local cast — keeps the rest of the type surface strict.
+      ...(langsmith
+        ? { providerOptions: { langsmith } as Record<string, any> }
+        : {}),
       prepareStep: async ({ stepNumber, messages }) => {
         if (actionLog.length === 0) return {};
         return {
@@ -362,4 +425,54 @@ export async function executePromptViaBrowserAgent(
       killed: false,
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Code path — direct exec wrapped with the same trace metadata shape as the
+// prompt path, so tracing details don't have to live in the controller.
+// ---------------------------------------------------------------------------
+
+export async function executeCodeViaBrowserSession(
+  browserId: string,
+  params: {
+    code: string;
+    language: string;
+    timeout: number;
+    origin?: string;
+  },
+  trace?: BrowserAgentTraceContext,
+): Promise<BrowserServiceExecResponse> {
+  // Arg must be named so langsmith's traceable sees the exec params as the
+  // run's `inputs`; a zero-arg closure would record `{}` and strip the code,
+  // language, timeout, and origin from every trace.
+  const run = async (execParams: typeof params) =>
+    browserServiceRequest<BrowserServiceExecResponse>(
+      "POST",
+      `/browsers/${browserId}/exec`,
+      execParams,
+    );
+
+  if (!trace) return run(params);
+
+  const traced = traceInteract(
+    run,
+    {
+      thread_id: trace.sessionId,
+      session_id: trace.sessionId,
+      scrape_id: trace.scrapeId,
+      team_id: trace.teamId,
+      org_id: trace.orgId,
+      browser_id: browserId,
+      mode: "code",
+      zeroDataRetention: trace.zeroDataRetention,
+      scrape_url: trace.scrapeUrl,
+      target_url: trace.targetUrl,
+      scrape_wait_for_ms: trace.scrapeWaitForMs,
+      scrape_actions: trace.scrapeActions,
+      scrape_origin: trace.scrapeOrigin,
+    } satisfies InteractTraceMetadata,
+    { name: "interact:code" },
+  );
+
+  return traced(params);
 }

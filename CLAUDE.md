@@ -1,6 +1,6 @@
 Firecrawl is a web scraper API. The directory you have access to is a monorepo:
  - `apps/api` has the actual API and worker code
- - `apps/js-sdk`, `apps/python-sdk`, `apps/rust-sdk` and `apps/java-sdk` are various SDKs
+ - `apps/*-sdk` are various SDKs
 
 When making changes to the API, here are the general steps you should take:
 1. Write some end-to-end tests that assert your win conditions, if they don't already exist
@@ -17,3 +17,5 @@ When making changes to the API, here are the general steps you should take:
   - The full test suite takes a long time to run, so you should try to only execute the relevant tests locally, and let CI run the full test suite.
 4. Push to a branch, open a PR, and let CI run to verify your win condition.
 Keep these steps in mind while building your TODO list.
+
+Never bypass `knip` failures (e.g. with `git commit --no-verify`). If the pre-commit `knip` check fails, fix the reported unused exports/files — even if they predate your change — before committing.

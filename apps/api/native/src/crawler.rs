@@ -33,6 +33,7 @@ pub struct FilterLinksCall {
   pub allow_backward_crawling: bool,
   pub ignore_robots_txt: bool,
   pub robots_txt: String,
+  pub robots_user_agent: Option<String>,
   pub allow_external_content_links: bool,
   pub allow_subdomains: bool,
 }
@@ -53,6 +54,7 @@ pub struct FilterUrlCall {
   pub excludes: Vec<String>,
   pub ignore_robots_txt: bool,
   pub robots_txt: String,
+  pub robots_user_agent: Option<String>,
   pub allow_external_content_links: bool,
   pub allow_subdomains: bool,
 }
@@ -131,6 +133,45 @@ fn is_file(path: &str) -> bool {
   } else {
     false
   }
+}
+
+static DOCUMENT_SEGMENT: LazyLock<Regex> =
+  LazyLock::new(|| Regex::new(r"\.[A-Za-z0-9]{2,}$").unwrap());
+
+struct CrawlScope {
+  prefix: String,
+  exact: Option<String>,
+}
+
+/// Resolves the path a crawl is scoped to when backward crawling is disabled.
+/// Keep in sync with getCrawlScope() in apps/api/src/lib/crawl-scope.ts.
+fn crawl_scope(initial_url: &Url) -> CrawlScope {
+  let path = initial_url.path();
+
+  if path.ends_with('/') {
+    return CrawlScope {
+      prefix: path.to_string(),
+      exact: None,
+    };
+  }
+
+  let last_slash = path.rfind('/').map_or(0, |i| i + 1);
+  if DOCUMENT_SEGMENT.is_match(&path[last_slash..]) {
+    return CrawlScope {
+      prefix: path[..last_slash].to_string(),
+      exact: None,
+    };
+  }
+
+  CrawlScope {
+    prefix: format!("{path}/"),
+    exact: Some(path.to_string()),
+  }
+}
+
+#[inline]
+fn is_within_crawl_scope(path: &str, scope: &CrawlScope) -> bool {
+  scope.exact.as_deref() == Some(path) || path.starts_with(&scope.prefix)
 }
 
 #[inline]
@@ -227,6 +268,22 @@ fn is_external_main_page(url_str: &str) -> bool {
   }
 }
 
+fn build_robot(
+  ignore_robots_txt: bool,
+  robots_txt: &str,
+  robots_user_agent: Option<&str>,
+) -> Option<Robot> {
+  if ignore_robots_txt || robots_txt.is_empty() {
+    return None;
+  }
+  if let Some(ua) = robots_user_agent {
+    return Robot::new(ua, robots_txt.as_bytes()).ok();
+  }
+  Robot::new("FireCrawlAgent", robots_txt.as_bytes())
+    .ok()
+    .or_else(|| Robot::new("FirecrawlAgent", robots_txt.as_bytes()).ok())
+}
+
 fn _filter_links(data: FilterLinksCall) -> std::result::Result<FilterLinksResult, String> {
   let limit = data.limit.map_or(usize::MAX, |x| x.max(0) as usize);
   if limit == 0 {
@@ -239,7 +296,7 @@ fn _filter_links(data: FilterLinksCall) -> std::result::Result<FilterLinksResult
   let base_url = Url::parse(&data.base_url).map_err(|e| format!("Base URL parse error: {e}"))?;
   let initial_url =
     Url::parse(&data.initial_url).map_err(|e| format!("Initial URL parse error: {e}"))?;
-  let initial_path = initial_url.path();
+  let scope = crawl_scope(&initial_url);
 
   let excludes_regex: Vec<Regex> = data
     .excludes
@@ -252,13 +309,11 @@ fn _filter_links(data: FilterLinksCall) -> std::result::Result<FilterLinksResult
     .filter_map(|i| Regex::new(i).ok())
     .collect();
 
-  let robot = if !data.ignore_robots_txt && !data.robots_txt.is_empty() {
-    Robot::new("FireCrawlAgent", data.robots_txt.as_bytes())
-      .ok()
-      .or_else(|| Robot::new("FirecrawlAgent", data.robots_txt.as_bytes()).ok())
-  } else {
-    None
-  };
+  let robot = build_robot(
+    data.ignore_robots_txt,
+    &data.robots_txt,
+    data.robots_user_agent.as_deref(),
+  );
 
   let mut result_links = Vec::new();
   let mut denial_reasons = HashMap::new();
@@ -301,7 +356,7 @@ fn _filter_links(data: FilterLinksCall) -> std::result::Result<FilterLinksResult
         continue;
       }
 
-      if !data.allow_backward_crawling && !path.starts_with(initial_path) {
+      if !data.allow_backward_crawling && !is_within_crawl_scope(path, &scope) {
         denial_reasons.insert(link, BACKWARD_CRAWLING.to_string());
         continue;
       }
@@ -458,13 +513,11 @@ fn _filter_url(data: FilterUrlCall) -> std::result::Result<FilterUrlResult, Stri
     .filter_map(|e| Regex::new(e).ok())
     .collect();
 
-  let robot = if !data.ignore_robots_txt && !data.robots_txt.is_empty() {
-    Robot::new("FireCrawlAgent", data.robots_txt.as_bytes())
-      .ok()
-      .or_else(|| Robot::new("FirecrawlAgent", data.robots_txt.as_bytes()).ok())
-  } else {
-    None
-  };
+  let robot = build_robot(
+    data.ignore_robots_txt,
+    &data.robots_txt,
+    data.robots_user_agent.as_deref(),
+  );
 
   if is_internal_link(&url, &base_url) {
     // INTERNAL LINKS
@@ -739,6 +792,54 @@ pub async fn process_sitemap(xml_content: String) -> Result<SitemapProcessingRes
 mod tests {
   use super::*;
 
+  fn scope_of(url: &str) -> CrawlScope {
+    crawl_scope(&Url::parse(url).unwrap())
+  }
+
+  #[test]
+  fn test_crawl_scope_document_seed_scopes_to_directory() {
+    let scope = scope_of("https://example.com/docs/guide.md");
+    assert_eq!(scope.prefix, "/docs/");
+    assert_eq!(scope.exact, None);
+
+    assert!(is_within_crawl_scope("/docs/other.md", &scope));
+    assert!(is_within_crawl_scope("/docs/nested/deep.md", &scope));
+    assert!(!is_within_crawl_scope("/blog/post.md", &scope));
+    assert!(!is_within_crawl_scope("/", &scope));
+  }
+
+  #[test]
+  fn test_crawl_scope_directory_seed() {
+    let scope = scope_of("https://example.com/docs/");
+    assert_eq!(scope.prefix, "/docs/");
+    assert_eq!(scope.exact, None);
+
+    assert!(is_within_crawl_scope("/docs/guide.md", &scope));
+    assert!(!is_within_crawl_scope("/docs", &scope));
+    assert!(!is_within_crawl_scope("/docsearch/x", &scope));
+  }
+
+  #[test]
+  fn test_crawl_scope_extensionless_seed_allows_seed_and_children() {
+    let scope = scope_of("https://example.com/docs");
+    assert_eq!(scope.prefix, "/docs/");
+    assert_eq!(scope.exact.as_deref(), Some("/docs"));
+
+    assert!(is_within_crawl_scope("/docs", &scope));
+    assert!(is_within_crawl_scope("/docs/guide", &scope));
+    // Sibling paths sharing the seed's prefix must not sneak in.
+    assert!(!is_within_crawl_scope("/docsearch", &scope));
+  }
+
+  #[test]
+  fn test_crawl_scope_root_seed() {
+    let scope = scope_of("https://example.com");
+    assert_eq!(scope.prefix, "/");
+    assert_eq!(scope.exact, None);
+
+    assert!(is_within_crawl_scope("/anything/at/all", &scope));
+  }
+
   #[test]
   fn test_parse_sitemap_xml_urlset() {
     let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -895,6 +996,7 @@ mod tests {
       allow_backward_crawling: true,
       allow_external_content_links: false,
       allow_subdomains: false,
+      robots_user_agent: None,
     };
 
     let result = _filter_links(data).unwrap();
@@ -929,6 +1031,7 @@ mod tests {
       allow_backward_crawling: true,
       allow_external_content_links: false,
       allow_subdomains: false,
+      robots_user_agent: None,
     };
 
     let result = _filter_links(data);
@@ -958,6 +1061,7 @@ mod tests {
       allow_backward_crawling: true,
       allow_external_content_links: false,
       allow_subdomains: false,
+      robots_user_agent: None,
     };
 
     let result = _filter_links(data);
@@ -985,6 +1089,7 @@ mod tests {
       allow_backward_crawling: true,
       allow_external_content_links: false,
       allow_subdomains: false,
+      robots_user_agent: None,
     };
 
     let result = _filter_links(data);
@@ -1015,6 +1120,7 @@ mod tests {
       allow_backward_crawling: true,
       allow_external_content_links: false,
       allow_subdomains: true,
+      robots_user_agent: None,
     };
 
     let result = _filter_links(data).unwrap();
@@ -1039,6 +1145,44 @@ mod tests {
         .get("https://sub.example.com/blog")
         .unwrap(),
       "INCLUDE_PATTERN"
+    );
+  }
+
+  #[test]
+  fn test_filter_links_honors_custom_robots_user_agent() {
+    // robots.txt allows the default FireCrawlAgent but blocks CustomBot. Without
+    // a custom user-agent the link is allowed; with `robots_user_agent` wired
+    // through it must be filtered.
+    let robots_txt = "User-agent: *\nAllow: /\n\nUser-agent: CustomBot\nDisallow: /";
+
+    let base_call = |ua: Option<String>| FilterLinksCall {
+      links: vec!["https://example.com/page".to_string()],
+      limit: Some(10),
+      includes: vec![],
+      excludes: vec![],
+      ignore_robots_txt: false,
+      robots_txt: robots_txt.to_string(),
+      max_depth: 10,
+      base_url: "https://example.com".to_string(),
+      initial_url: "https://example.com".to_string(),
+      regex_on_full_url: false,
+      allow_backward_crawling: true,
+      allow_external_content_links: false,
+      allow_subdomains: false,
+      robots_user_agent: ua,
+    };
+
+    let default_result = _filter_links(base_call(None)).unwrap();
+    assert_eq!(default_result.links, vec!["https://example.com/page"]);
+
+    let custom_result = _filter_links(base_call(Some("CustomBot".to_string()))).unwrap();
+    assert!(custom_result.links.is_empty());
+    assert_eq!(
+      custom_result
+        .denial_reasons
+        .get("https://example.com/page")
+        .unwrap(),
+      "ROBOTS_TXT"
     );
   }
 
