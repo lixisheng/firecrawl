@@ -187,6 +187,58 @@ export interface AuditMetadata {
   username: string;
 }
 
+export type PDFParser = {
+  type: "pdf";
+  mode?: "fast" | "auto" | "ocr";
+  maxPages?: number;
+  /** Include physical per-page markdown alongside document markdown. Populates `document.pages`. */
+  pages?: boolean;
+  /**
+   * @deprecated Renamed to `pages`. The API still accepts this as a silent alias.
+   */
+  pageMarkdown?: boolean;
+  /** Include per-page typed layout blocks (bounding boxes, block types, reading order). */
+  blocks?: boolean;
+  /**
+   * Join PDF pages in `document.markdown` with `\n\n---\n\n<!-- page N -->\n\n`,
+   * where N is the 1-based physical page of the content that follows. Markers
+   * appear between pages only (no leading marker for page 1), and numbering may
+   * skip pages merged by cross-page stitching — use `pages: true` when every
+   * physical page is needed. No new response field.
+   */
+  pageMarkers?: boolean;
+};
+
+export interface PdfPage {
+  pageNumber: number;
+  markdown: string;
+}
+
+export interface PdfBlockConfidence {
+  layout: number | null;
+  ocr: number | null;
+}
+
+export interface PdfBlockItem {
+  id: string;
+  type: string;
+  label: string | null;
+  bbox: [number, number, number, number] | null;
+  content: string;
+  markdownSpan: [number, number] | null;
+  readingOrder: number;
+  source: string | null;
+  confidence: PdfBlockConfidence;
+}
+
+export interface PdfPageBlocks {
+  pageNumber: number;
+  width: number | null;
+  height: number | null;
+  status: string;
+  items: PdfBlockItem[];
+}
+
 export interface ScrapeOptions {
   formats?: FormatOption[];
   headers?: Record<string, string>;
@@ -196,9 +248,7 @@ export interface ScrapeOptions {
   timeout?: number;
   waitFor?: number;
   mobile?: boolean;
-  parsers?: Array<
-    string | { type: "pdf"; mode?: "fast" | "auto" | "ocr"; maxPages?: number }
-  >;
+  parsers?: Array<string | PDFParser>;
   actions?: ActionOption[];
   location?: LocationConfig;
   skipTlsVerification?: boolean;
@@ -328,6 +378,7 @@ export interface AgentWebhookConfig {
 
 export interface BrandingProfile {
   colorScheme?: "light" | "dark";
+  brandName?: string;
   logo?: string | null;
   fonts?: Array<{
     family: string;
@@ -646,6 +697,10 @@ export interface Document {
   branding?: BrandingProfile;
   product?: ProductProfile;
   menu?: MenuProfile;
+  /** Physical PDF pages, present only when `parsers[].pages` is true. */
+  pages?: PdfPage[];
+  /** Typed PDF layout blocks, present only when `parsers[].blocks` is true. */
+  blocks?: PdfPageBlocks[];
 }
 
 // Pagination configuration for auto-fetching pages from v2 endpoints that return a `next` URL
@@ -658,6 +713,76 @@ export interface PaginationConfig {
   maxResults?: number;
   /** Maximum time to spend fetching additional pages (in seconds). */
   maxWaitTime?: number;
+}
+
+export type DeveloperSearchType = "doc" | "issue" | "pull_request" | "readme";
+
+export interface DeveloperSearchOptions {
+  /** Total ranked results, 1–100 (default 10). */
+  k?: number;
+  /** Passages per result, 1–5 (default 1). */
+  passages?: number;
+  /** Result kinds to search (default all). */
+  types?: DeveloperSearchType[];
+  /** GitHub owner/name filters, at most 20. */
+  repos?: string[];
+  /** Developer documentation source IDs, at most 20. */
+  sources?: string[];
+  /** One case-insensitive GitHub Linguist primary language. */
+  language?: string;
+  /** Repository topics that must all match, at most 8. */
+  topic?: string[];
+  /** One case-insensitive SPDX repository license identifier. */
+  license?: string;
+  /** Minimum repository stars. */
+  minStars?: number;
+  /** Maximum repository stars. */
+  maxStars?: number;
+  /** Filter by repository archived status. */
+  archived?: boolean;
+  /** Filter by repository fork status. */
+  fork?: boolean;
+  /** Return packaged agent-skill evidence only. */
+  skills?: "only";
+}
+
+export interface DeveloperSearchLicenseDisclosure {
+  state: "licensed" | "known_absent" | "unknown";
+  spdx_id: string | null;
+}
+
+export interface DeveloperSearchPassage {
+  text: string;
+  citation_url?: string;
+}
+
+export interface DeveloperSearchResult {
+  id: string;
+  url: string;
+  title?: string;
+  passages: DeveloperSearchPassage[];
+  // Accept both shapes while the API flattens license objects to SPDX strings.
+  license?: DeveloperSearchLicenseDisclosure | string;
+}
+
+export interface DeveloperSearchRepoStatus {
+  repo: string;
+  indexed: boolean;
+  types: { issue: boolean; pullRequest: boolean; readme: boolean };
+}
+
+export interface DeveloperSearchSourceStatus {
+  source: string;
+  indexed: boolean;
+}
+
+export interface DeveloperSearchResponse {
+  success: boolean;
+  results: DeveloperSearchResult[];
+  /** Present only when repos were requested. */
+  repos?: DeveloperSearchRepoStatus[];
+  /** Present only when sources were requested. */
+  sources?: DeveloperSearchSourceStatus[];
 }
 
 export interface SearchResultWeb {
@@ -691,9 +816,30 @@ export interface SearchData {
   web?: Array<SearchResultWeb | Document>;
   news?: Array<SearchResultNews | Document>;
   images?: Array<SearchResultImages | Document>;
-  developer?: Array<SearchResultWeb | Document>;
 }
 
+/**
+ * Narrows ordinary **web search**. A category does not switch `search()` to a
+ * different index.
+ *
+ * - `github` — restrict web results to github.com (a `site:` filter).
+ * - `research` — restrict web results to a fixed list of ~14 academic
+ *   *websites* (arxiv.org, pubmed.ncbi.nlm.nih.gov, nature.com, science.org,
+ *   ieee.org, sciencedirect.com, biorxiv.org, medrxiv.org, ...). It returns
+ *   ordinary web page results from those domains, **not** paper records.
+ * - `pdf` — restrict results to PDFs (adds `filetype:pdf`).
+ * - `developer` — developer-index results (issues, pull requests, READMEs and
+ *   documentation) served in `web`; cannot be combined with other categories.
+ *
+ * ⚠️ `categories: ["research"]` is **not** Firecrawl's research paper index.
+ * To search papers themselves — ~43M abstracts, roughly 90% biomedical
+ * (PubMed, bioRxiv, medRxiv) plus arXiv — with full abstracts, in-body passage
+ * reads and citation-graph expansion, use `firecrawl.research.searchPapers()`
+ * (plus `getPaper()` and `similarPapers()`), which call `/v2/search/research`.
+ *
+ * Rule of thumb: literature search → `research.searchPapers()`; web pages that
+ * happen to live on academic domains → `search({ categories: ["research"] })`.
+ */
 export interface CategoryOption {
   type: "github" | "research" | "pdf" | "developer";
 }
@@ -703,6 +849,14 @@ export interface SearchRequest {
   sources?: Array<
     "web" | "news" | "images" | { type: "web" | "news" | "images" }
   >;
+  /**
+   * Narrow web search by category. See {@link CategoryOption}.
+   *
+   * ⚠️ `"research"` is a website/domain filter over ordinary web search (~14
+   * academic domains), **not** the research paper index. For literature search
+   * over ~43M paper abstracts (PubMed / bioRxiv / medRxiv / arXiv) use
+   * `firecrawl.research.searchPapers()` instead.
+   */
   categories?: Array<
     "github" | "research" | "pdf" | "developer" | CategoryOption
   >;
@@ -1167,7 +1321,12 @@ export interface AgentStatusResponse {
   status: "processing" | "completed" | "failed";
   error?: string;
   data?: unknown;
-  model?: "spark-1-pro" | "spark-1-mini";
+  /**
+   * Server-provided model name. Widened past the request-side union on
+   * purpose: new models ship without an SDK release, so pinning this to known
+   * names makes every future model a type error at the call site.
+   */
+  model?: "spark-1-pro" | "spark-1-mini" | "spark-2" | (string & {});
   expiresAt: string;
   creditsUsed?: number;
 }
@@ -1362,8 +1521,20 @@ export interface BrowserListResponse {
 // ---------- Research (v2) ----------
 
 /**
- * Source identifiers grouped by namespace. Currently only `arxiv` is
- * populated; each value is an array of ids in that namespace.
+ * Source identifiers grouped by namespace. Each key is a namespace and each
+ * value is an array of ids in that namespace.
+ *
+ * Which namespaces appear depends on the paper's source. Biomedical records
+ * (PubMed, bioRxiv, medRxiv) typically carry `pmid`, `pmcid` and/or `doi`;
+ * arXiv records carry `arxiv`. The set is open — treat this as a lookup by
+ * namespace rather than a fixed schema, and prefer {@link PaperResult.primaryId}
+ * when you just need one citable identifier.
+ *
+ * @example
+ * ```ts
+ * const doi = paper.ids?.doi?.[0];
+ * const pmid = paper.ids?.pmid?.[0];
+ * ```
  */
 export type IdMap = Record<string, string[]>;
 
@@ -1379,7 +1550,7 @@ export interface PaperSignals {
   seedOverlap: number;
 }
 
-/** A ranked paper. `paperId` is canonical; arXiv lives in `ids`. */
+/** A ranked paper. `paperId` is canonical; source ids (pmid, pmcid, doi, arxiv, ...) live in `ids`. */
 export interface PaperResult {
   /** Canonical paper id — the Milvus INT64 primary key as a decimal string. */
   paperId: string;
@@ -1459,7 +1630,7 @@ export interface GitHubScoreBreakdown {
 }
 
 export interface GitHubSearchItem {
-  resultType: "github_history" | "repo_readme" | "web";
+  resultType?: "github_history" | "repo_readme" | "web";
   /** `owner/name`; empty for web results whose URL is not a repo page. */
   repo: string;
   url: string;

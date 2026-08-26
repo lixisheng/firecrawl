@@ -6,6 +6,7 @@ import {
 } from "./methods/scrape";
 import { parse as parseMethod } from "./methods/parse";
 import { search } from "./methods/search";
+import { developerSearch as developerSearchMethod } from "./methods/developer";
 import { map as mapMethod } from "./methods/map";
 import { feedback as feedbackMethod, searchFeedback as searchFeedbackMethod } from "./methods/feedback";
 import {
@@ -51,6 +52,8 @@ import type {
   ScrapeOptions,
   SearchData,
   SearchRequest,
+  DeveloperSearchOptions,
+  DeveloperSearchResponse,
   EndpointFeedbackRequest,
   FeedbackResponse,
   SearchFeedbackRequest,
@@ -241,6 +244,19 @@ export class FirecrawlClient {
   }
 
   /**
+   * Search the dedicated developer index with repository, documentation,
+   * artifact, language, topic, license, star, archive, and fork filters.
+   * Unlike `search(query, { categories: ["developer"] })`, this returns all
+   * requested passages, citations, license disclosures, and indexing echoes.
+   */
+  async developerSearch(
+    query: string,
+    options: DeveloperSearchOptions = {},
+  ): Promise<DeveloperSearchResponse> {
+    return developerSearchMethod(this.http, query, options);
+  }
+
+  /**
    * Submit feedback for a v2 job.
    * @param request Feedback payload with endpoint, job id, rating, and supporting signals.
    * @returns Feedback record and refund details.
@@ -261,8 +277,19 @@ export class FirecrawlClient {
 
   // Research
   /**
-   * Access the v2 research endpoints (arXiv papers + GitHub history/readmes).
-   * Example: `firecrawl.research.searchPapers("diffusion models")`.
+   * Access the v2 research endpoints — Firecrawl's **research paper index**
+   * (~43M paper abstracts) plus GitHub history/readmes.
+   *
+   * The paper corpus is roughly 90% biomedical and life sciences — PubMed,
+   * bioRxiv and medRxiv — with arXiv covering physics, mathematics and
+   * computer science.
+   *
+   * ⚠️ Not the same as `search({ categories: ["research"] })`, which is only a
+   * website/domain filter over ordinary web search (~14 academic domains,
+   * returning page snippets). Use `research.searchPapers()` for literature
+   * search.
+   *
+   * Example: `firecrawl.research.searchPapers("GLP-1 receptor agonists cardiovascular outcomes")`.
    */
   get research(): ResearchClient {
     if (!this._research) this._research = new ResearchClient(this.http);

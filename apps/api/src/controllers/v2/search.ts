@@ -1,4 +1,5 @@
 import { Response } from "express";
+import { externalRequestId } from "../../lib/external-request-id";
 import { config } from "../../config";
 import {
   RequestWithAuth,
@@ -41,6 +42,7 @@ import {
 } from "../../lib/key-restriction";
 import { wantsDeveloperCategory } from "../../search/developer";
 import { requestOrigin } from "../../lib/request-origin";
+import { isAgentInteropSecretValid } from "../../lib/agent-interop";
 
 export async function searchController(
   req: RequestWithAuth<{}, SearchResponse, SearchRequest>,
@@ -111,7 +113,7 @@ export async function searchController(
     if (
       req.body.__agentInterop &&
       config.AGENT_INTEROP_SECRET &&
-      req.body.__agentInterop.auth !== config.AGENT_INTEROP_SECRET
+      !isAgentInteropSecretValid(req.body.__agentInterop.auth)
     ) {
       return res.status(403).json({
         success: false,
@@ -185,6 +187,7 @@ export async function searchController(
         id: jobId,
         kind: "search",
         api_version: "v2",
+        external_request_id: externalRequestId(req),
         team_id: req.auth.team_id,
         origin: req.body.origin ?? "api",
         integration: req.body.integration,
@@ -265,7 +268,7 @@ export async function searchController(
         req.auth.team_id,
         result.searchCredits,
         req.acuc?.api_key_id ?? null,
-        billing,
+        { ...billing, chargeId: jobId },
       ).catch(error =>
         logger.error("Failed to bill team for search credits", {
           teamId: req.auth.team_id,
@@ -301,7 +304,9 @@ export async function searchController(
         time_taken: timeTakenInSeconds,
         team_id: req.auth.team_id,
         options: req.body,
-        credits_cost: shouldBill ? result.searchCredits : 0,
+        // Don't record preview tokens as billed in the ledger — only record
+        // credits when billing is actually applied.
+        credits_cost: !isSearchPreview && shouldBill ? result.searchCredits : 0,
         zeroDataRetention,
       },
       false,
@@ -322,9 +327,11 @@ export async function searchController(
           via: "search_category",
         },
         response: null,
-        num_results: result.response.developer?.length ?? 0,
+        num_results: result.developerResultsCount,
         time_taken: timeTakenInSeconds,
-        credits_cost: 0,
+        // Ensure preview-mode searches don't get a non-zero credits_cost
+        // in the research ledger when preview tokens are used.
+        credits_cost: !isSearchPreview && shouldBill ? result.searchCredits : 0,
         is_successful: true,
         zeroDataRetention,
       }).catch(ledgerError => {

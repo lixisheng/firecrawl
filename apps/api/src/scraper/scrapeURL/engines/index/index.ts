@@ -37,7 +37,10 @@ import {
   NoCachedDataError,
 } from "../../error";
 import {
+  getPDFBlocks,
+  getPDFMaxPages,
   getPDFPageMarkdown,
+  getPDFPageMarkers,
   shouldParsePDF,
 } from "../../../../controllers/v2/types";
 import { hasFormatOfType } from "../../../../lib/format-utils";
@@ -59,10 +62,13 @@ export async function sendDocumentToIndex(meta: Meta, document: Document) {
     // every access must go through the Exchange and its ledger.
     meta.winnerEngine !== "exchange" &&
     !(meta.winnerEngine === "pdf" && !shouldParsePDF(meta.options.parsers)) &&
-    // Page-aware results are capability-specific and are not represented in
-    // the URL index schema yet. Do not write an entry that could later be
-    // served without its required pages payload.
+    // Page-aware and block-aware results are capability-specific and are not
+    // represented in the URL index schema yet. Do not write an entry that
+    // could later be served without its required pages/blocks payload.
+    // Marker-bearing markdown is mutated output — never index it either.
     !getPDFPageMarkdown(meta.options.parsers) &&
+    !getPDFBlocks(meta.options.parsers) &&
+    !getPDFPageMarkers(meta.options.parsers) &&
     !meta.options.parsers?.some(parser => {
       if (
         typeof parser === "object" &&
@@ -545,6 +551,18 @@ export async function scrapeURLWithIndex(
     if (isPdfUrl) {
       // This is likely a parsed PDF cached, but we want unparsed - report cache miss
       logLookup("debug", "hit", { pdfMismatch: "cached_parsed_want_unparsed" });
+      throw new IndexMissError();
+    }
+  }
+
+  // Check if returned PDF has a higher numPages than what the user's parsers[pdf].maxPages config allows.
+  let numPages = doc.pdfMetadata?.numPages ?? doc.numPages;
+  if (numPages !== undefined) {
+    let maxPages = getPDFMaxPages(meta.options.parsers);
+    if (maxPages !== undefined && numPages > maxPages) {
+      logLookup("debug", "hit", {
+        pdfMismatch: "cached_pdf_overflows_parsers_max_pages",
+      });
       throw new IndexMissError();
     }
   }

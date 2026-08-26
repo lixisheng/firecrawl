@@ -16,6 +16,48 @@ const emptyStringAsUndefined = <T extends z.ZodTypeAny>(schema: T) =>
 const emptyStringAsDefault = <T extends z.ZodTypeAny>(schema: T) =>
   z.preprocess(value => (value === "" ? undefined : value), schema);
 
+const RESEARCH_PAPER_OPERATIONS = [
+  "search",
+  "inspect",
+  "read",
+  "similar",
+] as const;
+
+export type ResearchPaperOperation = (typeof RESEARCH_PAPER_OPERATIONS)[number];
+
+const researchKeylessDisabled = z.preprocess(
+  value => {
+    if (typeof value !== "string") return value;
+    const raw = value.trim().toLowerCase();
+    if (raw === "") return undefined;
+    if (["false", "0", "off", "no", "none"].includes(raw)) return [];
+    if (["true", "1", "on", "yes", "all"].includes(raw)) {
+      return [...RESEARCH_PAPER_OPERATIONS];
+    }
+    return raw
+      .split(",")
+      .map(operation => operation.trim())
+      .filter(Boolean);
+  },
+  z
+    .array(z.enum(RESEARCH_PAPER_OPERATIONS))
+    .default([...RESEARCH_PAPER_OPERATIONS]),
+);
+
+const containsLoneSurrogate = (value: string): boolean => {
+  for (let index = 0; index < value.length; index++) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const nextCodeUnit = value.charCodeAt(index + 1);
+      if (!(nextCodeUnit >= 0xdc00 && nextCodeUnit <= 0xdfff)) return true;
+      index++;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+};
+
 /* Schema */
 const configSchema = z.object({
   // Application
@@ -40,6 +82,7 @@ const configSchema = z.object({
     z.string().trim().optional(),
   ),
   RESEARCH_PROXY_URL: z.string().url().optional(),
+  RESEARCH_KEYLESS_DISABLED: researchKeylessDisabled,
   LABS_SEARCH_URL: z.string().url().optional(),
   LABS_SEARCH_SECRET: z.string().optional(),
 
@@ -109,6 +152,9 @@ const configSchema = z.object({
 
   // API Keys & Authentication
   BULL_AUTH_KEY: z.string().optional(),
+  S2S_FIRECRAWL_INTEGRATIONS_TO_FIRECRAWL_API_KEY: emptyStringAsUndefined(
+    z.string().trim().min(1),
+  ),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_BASE_URL: z.string().optional(),
   OPENROUTER_API_KEY: z.string().optional(),
@@ -285,9 +331,58 @@ const configSchema = z.object({
   // Async /jobs rollout is a separate, server-controlled cohort inside
   // traffic already selected for FirePDF. It is disabled by default.
   FIRE_PDF_ASYNC_PERCENT: z.coerce.number().min(0).max(100).default(0),
+  // Separate cohort for crawl/batch-originated scrapes (any scrape
+  // carrying a crawlId): no caller waits on one specific document, so
+  // these can ramp onto the async lane ahead of interactive traffic.
+  FIRE_PDF_ASYNC_BULK_ORIGIN_PERCENT: z.coerce
+    .number()
+    .min(0)
+    .max(100)
+    .default(0),
   FIRE_PDF_ASYNC_FORCE_TEAM_IDS: z.string().optional(),
   FIRE_PDF_ASYNC_DISABLE_TEAM_IDS: z.string().optional(),
   FIRE_PDF_ASYNC_ALLOW_REQUEST_OVERRIDE: z.stringbool().default(false),
+  // Large-PDF by-reference submits (30-256MB files uploaded to GCS and
+  // handed to fire-pdf via `input_gcs_uri`). This is an explicit on/off
+  // switch, not a percentage: no alternative engine exists at this size,
+  // so there is no cohort to sample "out" — only text-only degradation.
+  // FIRE_PDF_ENABLE remains the master switch for both paths.
+  FIRE_PDF_BY_REFERENCE_ENABLE: z.stringbool().default(true),
+  // Bucket that receives large-PDF inputs for by-reference async submits
+  // (fire-pdf reads them back via `input_gcs_uri`). fire-pdf only accepts
+  // URIs inside its own configured bucket + `inputs/` prefix, so this must
+  // match fire-pdf's FIRE_PDF_GCS_BUCKET. Upload failures (e.g. missing
+  // IAM grant) fall back to the pre-by-reference behavior for oversized
+  // files rather than failing the scrape.
+  FIRE_PDF_GCS_INPUT_BUCKET: z
+    .string()
+    .trim()
+    .min(1)
+    .default("firecrawl-pdf-pipeline"),
+  // Bucket fire-engine uses for its large-PDF handoff (files too big to
+  // inline as base64 in its response). Acts as the allowlist for inbound
+  // `file.gcs_uri` references — objects outside it are never fetched or
+  // copied. Deliberately no default: this is a security-sensitive inbound
+  // allowlist, so consuming references requires explicit opt-in (set to
+  // fire-engine's GCS_PDF_BUCKET_NAME); unset disables the path.
+  FIRE_ENGINE_PDF_GCS_BUCKET: emptyStringAsUndefined(z.string().trim().min(1)),
+  // Large-PDF size policy, applied per team on every acquisition path
+  // (direct download, fire-engine handoff, by-reference submit) and sent to
+  // fire-engine as the per-request pdfMaxSize. The default applies to every
+  // team; ids on the allowlist get the privileged cap. Both are clamped to
+  // the 256MB architectural ceiling.
+  PDF_BY_REFERENCE_MAX_BYTES_DEFAULT: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(50 * 1024 * 1024),
+  PDF_BY_REFERENCE_MAX_BYTES_PRIVILEGED: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(200 * 1024 * 1024),
+  // Comma-separated team ids granted the privileged cap.
+  PDF_BY_REFERENCE_PRIVILEGED_TEAM_IDS: z.string().optional(),
 
   // RunPod
   RUNPOD_MU_API_KEY: z.string().optional(),
@@ -378,6 +473,19 @@ const configSchema = z.object({
 
   // Billing
   AUTO_RECHARGE_ENABLED: z.stringbool().default(false),
+  // firebill — durable usage-event store that sits in front of Autumn. When
+  // both URL and SECRET are set, usage tracking for orgs listed in
+  // FIREBILL_ORG_IDS (comma-separated org UUIDs) is routed through firebill
+  // instead of directly to Autumn (gradual rollout).
+  FIREBILL_URL: emptyStringAsUndefined(z.string().url()),
+  FIREBILL_SECRET: emptyStringAsUndefined(z.string().trim().min(1)),
+  FIREBILL_ORG_IDS: delimitedList(",").optional(),
+  // Sticky percentage ramp, on top of the allowlist above. The bucket is a
+  // hash of the org id, so an org that is in at 5 is still in at 30 — a ramp
+  // only ever adds, and never reshuffles who is on which path mid-rollout.
+  // 0 (the default) is also the kill switch: the allowlist still routes, and
+  // nothing else does.
+  FIREBILL_ROLLOUT_PERCENT: z.coerce.number().min(0).max(100).default(0),
 
   // Miscellaneous
   IDMUX_URL: z.string().optional(),
@@ -388,7 +496,15 @@ const configSchema = z.object({
   DISABLE_MONITORING: z.stringbool().default(false),
 
   EXTRACT_V3_BETA_URL: z.string().optional(),
-  AGENT_INTEROP_SECRET: z.string().optional(),
+  AGENT_INTEROP_SECRET: z
+    .string()
+    .refine(value => value.trim().length > 0, {
+      error: "AGENT_INTEROP_SECRET must not be blank",
+    })
+    .refine(value => !containsLoneSurrogate(value), {
+      error: "AGENT_INTEROP_SECRET must not contain lone surrogates",
+    })
+    .optional(),
 
   // Wikipedia Enterprise API
   WIKIPEDIA_ENTERPRISE_USERNAME: z.string().optional(),

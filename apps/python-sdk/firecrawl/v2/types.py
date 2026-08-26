@@ -258,9 +258,10 @@ class AttributeResult(BaseModel):
 class BrandingProfile(BaseModel):
     """Branding information extracted from a website."""
 
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "allow", "populate_by_name": True}
 
     color_scheme: Optional[Literal["light", "dark"]] = None
+    brand_name: Optional[str] = Field(default=None, alias="brandName")
     logo: Optional[str] = None
     fonts: Optional[List[Dict[str, Any]]] = None
     colors: Optional[Dict[str, str]] = None
@@ -438,6 +439,52 @@ RedactPIIEntity = Literal[
 ]
 
 
+class PdfBlockConfidence(BaseModel):
+    """Layout and OCR confidence scores for a PDF block."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    layout: Optional[float] = None
+    ocr: Optional[float] = None
+
+
+class PdfBlockItem(BaseModel):
+    """A typed PDF layout block (bounding box, type, reading order)."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    id: str
+    type: str
+    label: Optional[str] = None
+    bbox: Optional[List[float]] = None
+    content: str
+    markdown_span: Optional[List[int]] = Field(default=None, alias="markdownSpan")
+    reading_order: int = Field(alias="readingOrder")
+    source: Optional[str] = None
+    confidence: PdfBlockConfidence
+
+
+class PdfPageBlocks(BaseModel):
+    """Typed layout blocks for a single PDF page."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    page_number: int = Field(alias="pageNumber")
+    width: Optional[float] = None
+    height: Optional[float] = None
+    status: str
+    items: List[PdfBlockItem] = Field(default_factory=list)
+
+
+class PdfPage(BaseModel):
+    """Physical PDF page markdown, present when parsers[].pages is true."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    page_number: int = Field(alias="pageNumber")
+    markdown: str
+
+
 class Document(BaseModel):
     """A scraped document."""
 
@@ -460,6 +507,8 @@ class Document(BaseModel):
     branding: Optional[BrandingProfile] = None
     product: Optional[ProductProfile] = None
     menu: Optional[MenuProfile] = None
+    pages: Optional[List[PdfPage]] = None
+    blocks: Optional[List[PdfPageBlocks]] = None
 
     @property
     def metadata_typed(self) -> DocumentMetadata:
@@ -559,12 +608,30 @@ SourceOption = Union[str, Source]
 class Category(BaseModel):
     """Configuration for a search category.
 
+    Categories narrow ordinary **web search**. They do not switch `search()` to
+    a different index.
+
     Supported categories:
-    - "github": Filter results to GitHub repositories
-    - "research": Filter results to research papers and academic sites
+    - "github": Restrict web results to github.com (a `site:` filter)
+    - "research": Restrict web results to a fixed list of ~14 academic
+      *websites* (arxiv.org, pubmed.ncbi.nlm.nih.gov, nature.com, science.org,
+      ieee.org, sciencedirect.com, biorxiv.org, medrxiv.org, ...). This is a
+      website/domain filter and it returns ordinary web page results for those
+      domains — **not** paper records.
     - "pdf": Filter results to PDF files (adds filetype:pdf to search)
-    - "developer": Add developer results (issues, pull requests, READMEs and
-      documentation) under `.developer`
+    - "developer": Developer-index results (issues, pull requests, READMEs and
+      documentation) served in `web`; cannot be combined with other categories
+
+    .. warning::
+       ``categories=["research"]`` is **not** Firecrawl's research paper index.
+       To search papers themselves — ~43M abstracts, about 90% biomedical
+       (PubMed, bioRxiv, medRxiv) plus arXiv — with full abstracts, in-body
+       passage reads and citation-graph expansion, use
+       :meth:`Firecrawl.search_papers` (and ``inspect_paper``, ``read_paper``,
+       ``related_papers``), which call ``/v2/search/research``.
+
+       Rule of thumb: literature search → ``search_papers()``; web pages that
+       happen to live on academic domains → ``search(categories=["research"])``.
     """
 
     type: str
@@ -1380,7 +1447,10 @@ class AgentResponse(BaseModel):
     status: Optional[Literal["processing", "completed", "failed"]] = None
     data: Optional[Any] = None
     error: Optional[str] = None
-    model: Optional[Literal["spark-1-pro", "spark-1-mini"]] = None
+    # Deliberately a plain str, not a Literal: this is server-provided and new
+    # models ship without an SDK release, so a narrow type turns an unknown
+    # model name into a ValidationError on every status poll.
+    model: Optional[str] = None
     expires_at: Optional[datetime] = None
     credits_used: Optional[int] = None
 
@@ -1599,6 +1669,27 @@ class PDFParser(BaseModel):
     type: Literal["pdf"] = "pdf"
     mode: Optional[Literal["fast", "auto", "ocr"]] = None
     max_pages: Optional[int] = None
+    pages: Optional[bool] = None
+    blocks: Optional[bool] = None
+    # Join PDF pages in document markdown with `\n\n---\n\n<!-- page N -->\n\n`
+    # (N = 1-based physical page of the content that follows). Markers appear
+    # between pages only, and numbering may skip pages merged by cross-page
+    # stitching — use `pages=True` when every physical page is needed.
+    page_markers: Optional[bool] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_deprecated_page_markdown(cls, data: Any) -> Any:
+        """Accept the pre-rename pageMarkdown alias and fold it into pages."""
+        if not isinstance(data, dict):
+            return data
+        folded = dict(data)
+        alias = folded.pop("page_markdown", None)
+        if alias is None:
+            alias = folded.pop("pageMarkdown", None)
+        if folded.get("pages") is None and alias is not None:
+            folded["pages"] = alias
+        return folded
 
 
 # Location types
@@ -1607,6 +1698,75 @@ class Location(BaseModel):
 
     country: Optional[str] = None
     languages: Optional[List[str]] = None
+
+
+DeveloperSearchType = Literal["doc", "issue", "pull_request", "readme"]
+
+
+class DeveloperSearchRequest(BaseModel):
+    """Request for the dedicated developer-search endpoint."""
+
+    query: str
+    k: Optional[int] = Field(default=None, ge=1, le=100)
+    passages: Optional[int] = Field(default=None, ge=1, le=5)
+    types: Optional[List[DeveloperSearchType]] = Field(default=None, max_length=4)
+    repos: Optional[List[str]] = Field(default=None, max_length=20)
+    sources: Optional[List[str]] = Field(default=None, max_length=20)
+    language: Optional[str] = None
+    topic: Optional[List[str]] = Field(default=None, max_length=8)
+    license: Optional[str] = None
+    min_stars: Optional[int] = Field(default=None, ge=0)
+    max_stars: Optional[int] = Field(default=None, ge=0)
+    archived: Optional[bool] = None
+    fork: Optional[bool] = None
+    skills: Optional[Literal["only"]] = None
+
+
+class DeveloperSearchLicenseDisclosure(BaseModel):
+    """Repository license disclosure returned by developer search."""
+
+    state: Literal["licensed", "known_absent", "unknown"]
+    spdx_id: Optional[str] = None
+
+
+class DeveloperSearchPassage(BaseModel):
+    text: str
+    citation_url: Optional[str] = None
+
+
+class DeveloperSearchResult(BaseModel):
+    id: str
+    url: str
+    title: Optional[str] = None
+    passages: List[DeveloperSearchPassage]
+    # Accept both shapes while the API flattens license objects to SPDX strings.
+    license: Optional[Union[DeveloperSearchLicenseDisclosure, str]] = None
+
+
+class DeveloperSearchRepoTypes(BaseModel):
+    model_config = {"populate_by_name": True}
+
+    issue: bool
+    pull_request: bool = Field(alias="pullRequest")
+    readme: bool
+
+
+class DeveloperSearchRepoStatus(BaseModel):
+    repo: str
+    indexed: bool
+    types: DeveloperSearchRepoTypes
+
+
+class DeveloperSearchSourceStatus(BaseModel):
+    source: str
+    indexed: bool
+
+
+class DeveloperSearchResponse(BaseModel):
+    success: bool
+    results: List[DeveloperSearchResult]
+    repos: Optional[List[DeveloperSearchRepoStatus]] = None
+    sources: Optional[List[DeveloperSearchSourceStatus]] = None
 
 
 class SearchRequest(BaseModel):
@@ -1700,7 +1860,6 @@ class SearchData(BaseModel):
     web: Optional[List[Union[SearchResultWeb, Document]]] = None
     news: Optional[List[Union[SearchResultNews, Document]]] = None
     images: Optional[List[Union[SearchResultImages, Document]]] = None
-    developer: Optional[List[Union[SearchResultWeb, Document]]] = None
 
     @property
     def data(self):
@@ -1711,8 +1870,6 @@ class SearchData(BaseModel):
             parts.append(f".news ({len(self.news)} results)")
         if self.images:
             parts.append(f".images ({len(self.images)} results)")
-        if self.developer:
-            parts.append(f".developer ({len(self.developer)} results)")
         available = ", ".join(parts) if parts else ".web, .news, or .images"
         raise AttributeError(
             f"SearchData has no '.data'. Results are grouped by source: {available}"

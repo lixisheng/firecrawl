@@ -22,6 +22,7 @@ import { ScrapeJobData } from "../../types";
 import { teamConcurrencySemaphore } from "../../services/worker/team-semaphore";
 import { getJobPriority } from "../../lib/job-priority";
 import { logRequest } from "../../services/logging/log_job";
+import { externalRequestId } from "../../lib/external-request-id";
 import { getErrorContactMessage } from "../../lib/deployment";
 import { captureExceptionWithZdrCheck } from "../../services/sentry";
 import type { BillingMetadata } from "../../services/billing/types";
@@ -40,6 +41,7 @@ import {
   DOCUMENT_EXTENSIONS,
   documentExtensionFromContentType,
 } from "../../lib/document-formats";
+import { isAgentInteropSecretValid } from "../../lib/agent-interop";
 
 const AGENT_INTEROP_CONCURRENCY_BOOST = 3;
 export const SUPPORTED_PARSE_FILE_TYPES =
@@ -325,7 +327,7 @@ export async function parseController(
       if (
         req.body.__agentInterop &&
         config.AGENT_INTEROP_SECRET &&
-        req.body.__agentInterop.auth !== config.AGENT_INTEROP_SECRET
+        !isAgentInteropSecretValid(req.body.__agentInterop.auth)
       ) {
         return res.status(403).json({
           success: false,
@@ -394,6 +396,7 @@ export async function parseController(
           id: jobId,
           kind: "parse",
           api_version: "v2",
+          external_request_id: externalRequestId(req),
           team_id: req.auth.team_id,
           origin: req.body.origin ?? "api",
           integration: req.body.integration,

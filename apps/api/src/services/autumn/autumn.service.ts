@@ -4,6 +4,13 @@ import { eq } from "drizzle-orm";
 import { dbRr } from "../../db/connection";
 import * as schema from "../../db/schema";
 import { autumnClient } from "./client";
+import {
+  firebillFinalize,
+  firebillLock,
+  firebillTrack,
+  shouldRouteToFirebill,
+} from "./firebill";
+import { billingRouteTotal } from "./metrics";
 import type {
   CreateEntityParams,
   CreateEntityResult,
@@ -208,13 +215,48 @@ export class AutumnService {
     }
   }
 
+  /**
+   * Whether this team's usage is currently routed through firebill. Used by
+   * billers to pick route-specific failure handling (on the firebill route a
+   * recorded charge stands and dedupes, so compensating refunds and duplicate
+   * enqueues behave differently). Never throws: an error means "not routed",
+   * falling back to the pre-firebill behavior.
+   */
+  async isRoutedThroughFirebill(teamId: string): Promise<boolean> {
+    if (this.isPreviewTeam(teamId)) return false;
+    try {
+      return shouldRouteToFirebill(await this.resolveOrgId(teamId));
+    } catch {
+      return false;
+    }
+  }
+
   private async track({
     customerId,
     entityId,
     featureId,
     value,
     properties,
+    idempotencyKey,
   }: TrackParams): Promise<boolean> {
+    // Gradual rollout: allowlisted orgs, and those in the sticky
+    // FIREBILL_ROLLOUT_PERCENT bucket, bill through firebill. No fallback to
+    // Autumn on failure — firebill may already own the event, and the SDK sends
+    // no idempotency key, so the pair could not be deduped.
+    if (shouldRouteToFirebill(customerId)) {
+      billingRouteTotal.labels("firebill").inc();
+      return await firebillTrack({
+        customerId,
+        entityId,
+        featureId,
+        value,
+        properties,
+        idempotencyKey,
+      });
+    }
+
+    billingRouteTotal.labels("direct").inc();
+
     if (!autumnClient) return false;
 
     try {
@@ -410,6 +452,34 @@ export class AutumnService {
 
     try {
       const customerId = await this.ensureTrackingContext(teamId);
+
+      // Gradual firebill rollout, mirroring track(): allowlisted orgs take
+      // their holds through firebill. The hold still lives in Autumn (firebill
+      // keeps no lock state), but only firebill pins the retry/timeout budget
+      // around the call. An unavailable answer maps to "skipped" — proceed
+      // unlocked — exactly like a direct-Autumn check failure below.
+      if (shouldRouteToFirebill(customerId)) {
+        const result = await firebillLock({
+          customerId,
+          entityId: teamId,
+          featureId,
+          value,
+          lockId: resolvedLockId,
+          // firebill requires an expiry (Autumn releasing the hold by itself
+          // is what makes firebill lock-table-free); default to an hour, the
+          // monitor runner's convention, when the caller sets none.
+          expiresAt: expiresAt ?? Date.now() + 60 * 60 * 1000,
+          properties,
+        });
+        if (result.status === "locked") {
+          return { status: "locked", lockId: result.lockId };
+        }
+        if (result.status === "denied") {
+          return { status: "denied" };
+        }
+        return { status: "skipped" };
+      }
+
       const { allowed } = await autumnClient.check({
         customerId,
         entityId: teamId,
@@ -457,13 +527,25 @@ export class AutumnService {
 
   /**
    * Finalizes a previously-acquired Autumn lock.
+   *
+   * When the caller supplies the lock's teamId and that team's org is on the
+   * firebill rollout, the settle goes through firebill, which queues it
+   * durably and retries delivery — a dropped direct finalize means the hold
+   * just expires, leaving a confirm's work unbilled. Either route lands on the
+   * same Autumn lock, so routing is a durability choice, not a correctness one.
    */
   async finalizeCreditsLock({
     lockId,
     action,
     overrideValue,
     properties,
+    teamId,
   }: FinalizeCreditsLockParams): Promise<void> {
+    if (teamId && (await this.isRoutedThroughFirebill(teamId))) {
+      await firebillFinalize({ lockId, action, overrideValue, properties });
+      return;
+    }
+
     if (!autumnClient) return;
 
     try {
@@ -499,6 +581,7 @@ export class AutumnService {
     value,
     properties,
     featureId = CREDITS_FEATURE_ID,
+    idempotencyKey,
   }: TrackCreditsParams): Promise<boolean> {
     if (!autumnClient) return false;
     if (this.isPreviewTeam(teamId)) return false;
@@ -511,6 +594,7 @@ export class AutumnService {
         featureId,
         value,
         properties,
+        idempotencyKey,
       });
     } catch (error) {
       logger.error(
@@ -676,6 +760,7 @@ export class AutumnService {
     value,
     properties,
     featureId = CREDITS_FEATURE_ID,
+    idempotencyKey,
   }: TrackCreditsParams): Promise<void> {
     if (!autumnClient) return;
     if (this.isPreviewTeam(teamId)) return;
@@ -688,6 +773,7 @@ export class AutumnService {
         featureId,
         value: -value,
         properties: { ...properties, source: "autumn_refund" },
+        idempotencyKey,
       });
     } catch (error) {
       logger.error(

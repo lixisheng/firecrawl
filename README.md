@@ -388,8 +388,8 @@ Choose between two models based on your needs:
 
 | Model | Cost | Best For |
 |-------|------|----------|
-| `spark-1-mini` (default) | 60% cheaper | Most tasks |
-| `spark-1-pro` | Standard | Complex research, critical data gathering |
+| `spark-1-mini` | 60% cheaper | Most tasks |
+| `spark-1-pro` (default) | Standard | Complex research, critical data gathering |
 ```python
 result = app.agent(
     prompt="Compare enterprise features across Firecrawl, Apify, and ScrapingBee",
@@ -853,10 +853,11 @@ print_r($results);
 ## Integrations
 
 **Agents & AI Tools**
-- [Firecrawl Skill](https://docs.firecrawl.dev/sdks/cli)
-- [Firecrawl CLI Skills](https://github.com/firecrawl/cli#agent-skills)
-- [Firecrawl Workflows](https://github.com/firecrawl/firecrawl-workflows)
+- [Firecrawl Skills Catalog](https://github.com/firecrawl/skills) — install with `npx skills add firecrawl/skills`
+- [Firecrawl CLI](https://docs.firecrawl.dev/sdks/cli)
 - [Firecrawl MCP](https://github.com/mendableai/firecrawl-mcp-server)
+
+The build skills (integrating Firecrawl into product code) are authored in this repo under [`skills/`](./skills) and mirrored into the catalog by CI. Contributing skills? CLI skills (including the research/developer index skills) → PR [`firecrawl/cli`](https://github.com/firecrawl/cli). Build/SDK skills → PR this repo (`skills/`). Workflow skills → PR [`firecrawl/firecrawl-workflows`](https://github.com/firecrawl/firecrawl-workflows). The catalog ([`firecrawl/skills`](https://github.com/firecrawl/skills)) is read-only — never PR it directly.
 
 **Platforms**
 - [Lovable](https://docs.lovable.dev/integrations/firecrawl)

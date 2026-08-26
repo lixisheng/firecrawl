@@ -146,6 +146,73 @@ public class ModelsTests
     }
 
     [Fact]
+    public void Document_DeserializesPagesCorrectly()
+    {
+        var json = """
+        {
+            "markdown": "# Annual Report 2025",
+            "pages": [
+                { "pageNumber": 1, "markdown": "# Cover" },
+                { "pageNumber": 2, "markdown": "## Intro" }
+            ]
+        }
+        """;
+
+        var doc = JsonSerializer.Deserialize<Document>(json, JsonOptions);
+        Assert.NotNull(doc);
+        Assert.Equal("# Annual Report 2025", doc.Markdown);
+        Assert.NotNull(doc.Pages);
+        Assert.Equal(2, doc.Pages.Count);
+        Assert.Equal(1, doc.Pages[0].PageNumber);
+        Assert.Equal("# Cover", doc.Pages[0].Markdown);
+        Assert.Equal(2, doc.Pages[1].PageNumber);
+        Assert.Equal("## Intro", doc.Pages[1].Markdown);
+    }
+
+    [Fact]
+    public void Document_DeserializesBlocksCorrectly()
+    {
+        var json = """
+        {
+            "markdown": "# Annual Report 2025",
+            "blocks": [
+                {
+                    "pageNumber": 1,
+                    "width": 1700,
+                    "height": 2200,
+                    "status": "ok",
+                    "items": [
+                        {
+                            "id": "p1.b0",
+                            "type": "title",
+                            "label": "doc_title",
+                            "bbox": [0.118, 0.054, 0.882, 0.092],
+                            "content": "# Annual Report 2025",
+                            "markdownSpan": [0, 21],
+                            "readingOrder": 0,
+                            "source": "native_text",
+                            "confidence": { "layout": 0.97, "ocr": null }
+                        }
+                    ]
+                }
+            ]
+        }
+        """;
+
+        var doc = JsonSerializer.Deserialize<Document>(json, JsonOptions);
+        Assert.NotNull(doc);
+        Assert.Equal("# Annual Report 2025", doc.Markdown);
+        Assert.NotNull(doc.Blocks);
+        Assert.Single(doc.Blocks);
+        Assert.Equal(1, doc.Blocks[0].PageNumber);
+        Assert.Equal("ok", doc.Blocks[0].Status);
+        Assert.Single(doc.Blocks[0].Items);
+        Assert.Equal("title", doc.Blocks[0].Items[0].Type);
+        Assert.Equal(0, doc.Blocks[0].Items[0].ReadingOrder);
+        Assert.Equal(0.97, doc.Blocks[0].Items[0].Confidence?.Layout);
+    }
+
+    [Fact]
     public void Document_DeserializesProductCorrectly()
     {
         var json = """
@@ -357,6 +424,25 @@ public class ModelsTests
         Assert.True(job.IsDone);
         Assert.NotNull(job.Data);
         Assert.Equal(2, job.Data.Count);
+    }
+
+    [Fact]
+    public void PdfParser_SerializesPageMarkers()
+    {
+        var parser = new PdfParser
+        {
+            Mode = "auto",
+            Pages = true,
+            Blocks = true,
+            PageMarkers = true
+        };
+
+        var json = JsonSerializer.Serialize(parser, JsonOptions);
+        Assert.Contains("\"type\":\"pdf\"", json);
+        Assert.Contains("\"mode\":\"auto\"", json);
+        Assert.Contains("\"pages\":true", json);
+        Assert.Contains("\"blocks\":true", json);
+        Assert.Contains("\"pageMarkers\":true", json);
     }
 
     [Fact]

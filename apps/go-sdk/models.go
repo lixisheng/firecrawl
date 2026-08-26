@@ -24,17 +24,69 @@ type Document struct {
 	Branding       map[string]interface{}   `json:"branding,omitempty"`
 	Product        *ProductProfile          `json:"product,omitempty"`
 	Menu           *MenuProfile             `json:"menu,omitempty"`
+	// Pages is per-page PDF markdown, present only when parsers[].pages is true.
+	Pages []PdfPage `json:"pages,omitempty"`
+	// Blocks is typed PDF layout data, present only when parsers[].blocks is true.
+	Blocks []PdfPageBlocks `json:"blocks,omitempty"`
+}
+
+// PDFParser configures PDF parsing. Use in ScrapeOptions.Parsers / ParseOptions.Parsers.
+type PDFParser struct {
+	Type     string `json:"type"`
+	Mode     string `json:"mode,omitempty"`
+	MaxPages *int   `json:"maxPages,omitempty"`
+	Pages    *bool  `json:"pages,omitempty"`
+	Blocks   *bool  `json:"blocks,omitempty"`
+	// PageMarkers joins PDF pages in document.markdown with
+	// `\n\n---\n\n<!-- page N -->\n\n`. Markers appear between pages only;
+	// numbering may skip pages merged by cross-page stitching — use Pages
+	// when every physical page is needed. No new response field.
+	PageMarkers *bool `json:"pageMarkers,omitempty"`
+}
+
+// PdfPage is physical markdown for a single PDF page.
+type PdfPage struct {
+	PageNumber int    `json:"pageNumber"`
+	Markdown   string `json:"markdown"`
+}
+
+// PdfBlockConfidence is layout and OCR confidence for a PDF block.
+type PdfBlockConfidence struct {
+	Layout *float64 `json:"layout"`
+	OCR    *float64 `json:"ocr"`
+}
+
+// PdfBlockItem is a typed PDF layout block.
+type PdfBlockItem struct {
+	ID           string             `json:"id"`
+	Type         string             `json:"type"`
+	Label        *string            `json:"label"`
+	BBox         []float64          `json:"bbox"`
+	Content      string             `json:"content"`
+	MarkdownSpan []int              `json:"markdownSpan"`
+	ReadingOrder int                `json:"readingOrder"`
+	Source       *string            `json:"source"`
+	Confidence   PdfBlockConfidence `json:"confidence"`
+}
+
+// PdfPageBlocks is the typed layout for a single PDF page.
+type PdfPageBlocks struct {
+	PageNumber int            `json:"pageNumber"`
+	Width      *float64       `json:"width"`
+	Height     *float64       `json:"height"`
+	Status     string         `json:"status"`
+	Items      []PdfBlockItem `json:"items"`
 }
 
 // ProductProfile represents structured product data extracted from a page
 // via the `product` scrape format.
 type ProductProfile struct {
-	Title         string               `json:"title"`
-	Brand         string               `json:"brand,omitempty"`
-	Category      string               `json:"category,omitempty"`
-	URL           string               `json:"url"`
-	Description   string               `json:"description,omitempty"`
-	Variants      []ProductVariant     `json:"variants,omitempty"`
+	Title       string           `json:"title"`
+	Brand       string           `json:"brand,omitempty"`
+	Category    string           `json:"category,omitempty"`
+	URL         string           `json:"url"`
+	Description string           `json:"description,omitempty"`
+	Variants    []ProductVariant `json:"variants,omitempty"`
 }
 
 // ProductImage is a single product image.

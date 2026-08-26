@@ -23,6 +23,14 @@ export type TrackParams = {
   featureId: string;
   value: number;
   properties?: Record<string, unknown>;
+  /**
+   * Stable per-charge identity, honored on the firebill route only (the
+   * direct Autumn SDK does not expose its Idempotency-Key header). When set,
+   * a caller retry — or a requeued job re-billing the same work — dedupes
+   * instead of double-billing. Must be unique per CHARGE, never a shared id
+   * like a crawl id (every page shares it: collision = underbilling).
+   */
+  idempotencyKey?: string;
 };
 
 export type EnsureOrgProvisionedParams = {
@@ -64,6 +72,14 @@ export type FinalizeCreditsLockParams = {
   action: "confirm" | "release";
   overrideValue?: number;
   properties?: Record<string, unknown>;
+  /**
+   * The team the lock was taken for. Needed to route the settle through
+   * firebill for allowlisted orgs — a finalize carries no customer context of
+   * its own. When omitted, the settle goes directly to Autumn (which also
+   * works for a firebill-taken lock: the hold lives in Autumn either way, but
+   * loses firebill's durable retry).
+   */
+  teamId?: string;
 };
 
 export type TrackCreditsParams = {
@@ -71,6 +87,8 @@ export type TrackCreditsParams = {
   value: number;
   properties?: Record<string, unknown>;
   featureId?: string;
+  /** See TrackParams.idempotencyKey. */
+  idempotencyKey?: string;
 };
 
 export type CreateEntityResult =

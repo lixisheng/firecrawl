@@ -14,6 +14,8 @@ from .types import (
     Document,
     SearchRequest,
     SearchData,
+    DeveloperSearchResponse,
+    DeveloperSearchType,
     SourceOption,
     CategoryOption,
     CrawlRequest,
@@ -60,6 +62,7 @@ from .methods import parse as parse_module
 from .methods import crawl as crawl_module  
 from .methods import batch as batch_module
 from .methods import search as search_module
+from .methods import developer as developer_module
 from .methods import map as map_module
 from .methods import batch as batch_methods
 from .methods import usage as usage_methods
@@ -68,6 +71,14 @@ from .methods import agent as agent_module
 from .methods import browser as browser_module
 from .methods import monitor as monitor_module
 from .methods import research as research_module
+from .methods.research_docs import (
+    CLIENT_INSPECT_PAPER_DOC,
+    CLIENT_READ_PAPER_DOC,
+    CLIENT_RELATED_PAPERS_DOC,
+    CLIENT_SEARCH_GITHUB_DOC,
+    CLIENT_SEARCH_PAPERS_DOC,
+    doc,
+)
 from .watcher import Watcher
 
 # Kwargs that map to ScrapeOptions fields. Used by async crawl normalization
@@ -225,18 +236,24 @@ class FirecrawlClient:
         ) if any(v is not None for v in [formats, headers, include_tags, exclude_tags, only_main_content, timeout, wait_for, mobile, parsers, actions, location, skip_tls_verification, remove_base64_images, fast_mode, use_mock, block_ads, proxy, max_age, store_in_cache, lockdown, threat_protection, profile, audit_metadata, integration]) else None
         return scrape_module.scrape(self.http_client, url, options)
 
+    # Research paper index (/v2/search/research)
+    @doc(CLIENT_SEARCH_PAPERS_DOC)
     def search_papers(self, query: str, **kwargs):
         return research_module.search_papers(self.http_client, query, **kwargs)
 
+    @doc(CLIENT_INSPECT_PAPER_DOC)
     def inspect_paper(self, paper_id: str):
         return research_module.inspect_paper(self.http_client, paper_id)
 
+    @doc(CLIENT_READ_PAPER_DOC)
     def read_paper(self, paper_id: str, query: str, **kwargs):
         return research_module.read_paper(self.http_client, paper_id, query, **kwargs)
 
+    @doc(CLIENT_RELATED_PAPERS_DOC)
     def related_papers(self, paper_id: str, intent: str, **kwargs):
         return research_module.related_papers(self.http_client, paper_id, intent, **kwargs)
 
+    @doc(CLIENT_SEARCH_GITHUB_DOC)
     def search_github(self, query: str, **kwargs):
         return research_module.search_github(self.http_client, query, **kwargs)
 
@@ -445,6 +462,43 @@ class FirecrawlClient:
         )
 
         return search_module.search(self.http_client, request)
+
+    def developer_search(
+        self,
+        query: str,
+        *,
+        k: Optional[int] = None,
+        passages: Optional[int] = None,
+        types: Optional[List[DeveloperSearchType]] = None,
+        repos: Optional[List[str]] = None,
+        sources: Optional[List[str]] = None,
+        language: Optional[str] = None,
+        topic: Optional[List[str]] = None,
+        license: Optional[str] = None,
+        min_stars: Optional[int] = None,
+        max_stars: Optional[int] = None,
+        archived: Optional[bool] = None,
+        fork: Optional[bool] = None,
+        skills: Optional[Literal["only"]] = None,
+    ) -> DeveloperSearchResponse:
+        """Search the dedicated developer index with full filters and evidence."""
+        return developer_module.developer_search(
+            self.http_client,
+            query,
+            k=k,
+            passages=passages,
+            types=types,
+            repos=repos,
+            sources=sources,
+            language=language,
+            topic=topic,
+            license=license,
+            min_stars=min_stars,
+            max_stars=max_stars,
+            archived=archived,
+            fork=fork,
+            skills=skills,
+        )
     
     def crawl(
         self,
@@ -1343,7 +1397,7 @@ class FirecrawlClient:
         integration: Optional[str] = None,
         max_credits: Optional[int] = None,
         strict_constrain_to_urls: Optional[bool] = None,
-        model: Optional[Literal["spark-1-pro", "spark-1-mini"]] = None,
+        model: Optional[Literal["spark-1-pro", "spark-1-mini", "spark-2"]] = None,
         webhook: Optional[Union[str, AgentWebhookConfig]] = None,
         threat_protection: Optional[ThreatProtectionOptions] = None,
         audit_metadata: Optional[AuditMetadata] = None,
@@ -1356,7 +1410,7 @@ class FirecrawlClient:
             schema: Target JSON schema for the output (dict or Pydantic BaseModel)
             integration: Integration tag/name
             max_credits: Maximum credits to use (optional)
-            model: Model to use for the agent ("spark-1-pro" or "spark-1-mini")
+            model: Model to use for the agent ("spark-1-pro" (default), "spark-1-mini", or "spark-2")
             webhook: Webhook URL or configuration for notifications
             threat_protection: Enterprise per-request override of the team's
                 threat protection policy
@@ -1389,7 +1443,7 @@ class FirecrawlClient:
         timeout: Optional[int] = None,
         max_credits: Optional[int] = None,
         strict_constrain_to_urls: Optional[bool] = None,
-        model: Optional[Literal["spark-1-pro", "spark-1-mini"]] = None,
+        model: Optional[Literal["spark-1-pro", "spark-1-mini", "spark-2"]] = None,
         webhook: Optional[Union[str, AgentWebhookConfig]] = None,
         threat_protection: Optional[ThreatProtectionOptions] = None,
         audit_metadata: Optional[AuditMetadata] = None,
@@ -1404,7 +1458,7 @@ class FirecrawlClient:
             poll_interval: Seconds between status checks
             timeout: Maximum seconds to wait (None for no timeout)
             max_credits: Maximum credits to use (optional)
-            model: Model to use for the agent ("spark-1-pro" or "spark-1-mini")
+            model: Model to use for the agent ("spark-1-pro" (default), "spark-1-mini", or "spark-2")
             webhook: Webhook URL or configuration for notifications
             threat_protection: Enterprise per-request override of the team's
                 threat protection policy
