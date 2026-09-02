@@ -269,6 +269,29 @@ export class PDFAntibotError extends TransportableError {
   }
 }
 
+export class PDFFetchProxyError extends TransportableError {
+  constructor() {
+    const message = isSelfHosted()
+      ? "Failed to download the PDF file because the configured proxy could not establish a connection to the website (the proxy rejected the tunneling request). Check your proxy configuration (PROXY_SERVER) and whether the target site is reachable from it, then retry."
+      : "Failed to download the PDF file — Firecrawl could not establish a connection to the website while downloading it. Please retry your request, and if the issue persists, contact help@firecrawl.com with your request ID for investigation.";
+
+    super("SCRAPE_PDF_FETCH_PROXY_ERROR", message);
+  }
+
+  serialize() {
+    return super.serialize();
+  }
+
+  static deserialize(
+    _: ErrorCodes,
+    data: ReturnType<typeof this.prototype.serialize>,
+  ) {
+    const x = new PDFFetchProxyError();
+    x.stack = data.stack;
+    return x;
+  }
+}
+
 export class PDFInsufficientTimeError extends TransportableError {
   constructor(
     public pageCount: number,
@@ -468,6 +491,29 @@ export class DocumentAntibotError extends TransportableError {
   }
 }
 
+export class DocumentFetchProxyError extends TransportableError {
+  constructor() {
+    const message = isSelfHosted()
+      ? "Failed to download the document file because the configured proxy could not establish a connection to the website (the proxy rejected the tunneling request). Check your proxy configuration (PROXY_SERVER) and whether the target site is reachable from it, then retry."
+      : "Failed to download the document file — Firecrawl could not establish a connection to the website while downloading it. Please retry your request, and if the issue persists, contact help@firecrawl.com with your request ID for investigation.";
+
+    super("SCRAPE_DOCUMENT_FETCH_PROXY_ERROR", message);
+  }
+
+  serialize() {
+    return super.serialize();
+  }
+
+  static deserialize(
+    _: ErrorCodes,
+    data: ReturnType<typeof this.prototype.serialize>,
+  ) {
+    const x = new DocumentFetchProxyError();
+    x.stack = data.stack;
+    return x;
+  }
+}
+
 export class DocumentPrefetchFailed extends TransportableError {
   constructor() {
     const message = isSelfHosted()
@@ -553,6 +599,52 @@ export class MediaAccessDeniedError extends TransportableError {
     data: ReturnType<typeof this.prototype.serialize>,
   ) {
     const x = new MediaAccessDeniedError(data.message);
+    x.stack = data.stack;
+    return x;
+  }
+}
+
+export class PromptInjectionDetectedError extends TransportableError {
+  constructor(message?: string) {
+    super(
+      "SCRAPE_PROMPT_INJECTION_DETECTED",
+      message ??
+        "The scraped page content appears to contain a prompt injection attempt, so JSON extraction was aborted for safety.",
+    );
+  }
+
+  serialize() {
+    return super.serialize();
+  }
+
+  static deserialize(
+    _: ErrorCodes,
+    data: ReturnType<typeof this.prototype.serialize>,
+  ) {
+    const x = new PromptInjectionDetectedError(data.message);
+    x.stack = data.stack;
+    return x;
+  }
+}
+
+export class JsonExtractionContentTooLargeError extends TransportableError {
+  constructor(message?: string) {
+    super(
+      "SCRAPE_JSON_CONTENT_TOO_LARGE",
+      message ??
+        "The scraped page content is too large for JSON extraction, so extraction was aborted.",
+    );
+  }
+
+  serialize() {
+    return super.serialize();
+  }
+
+  static deserialize(
+    _: ErrorCodes,
+    data: ReturnType<typeof this.prototype.serialize>,
+  ) {
+    const x = new JsonExtractionContentTooLargeError(data.message);
     x.stack = data.stack;
     return x;
   }
@@ -681,7 +773,9 @@ export type ScrapeRetryLimitReason =
   | "feature_toggle"
   | "feature_removal"
   | "pdf_antibot"
-  | "document_antibot";
+  | "document_antibot"
+  | "pdf_fetch_proxy"
+  | "document_fetch_proxy";
 
 export type ScrapeRetryStats = {
   totalAttempts: number;
@@ -689,6 +783,8 @@ export type ScrapeRetryStats = {
   removeFeatureAttempts: number;
   pdfAntibotAttempts: number;
   documentAntibotAttempts: number;
+  pdfFetchProxyAttempts: number;
+  documentFetchProxyAttempts: number;
 };
 
 export class ScrapeRetryLimitError extends TransportableError {
@@ -714,7 +810,14 @@ export class ScrapeRetryLimitError extends TransportableError {
     _: ErrorCodes,
     data: ReturnType<typeof this.prototype.serialize>,
   ) {
-    const x = new ScrapeRetryLimitError(data.reason, data.stats);
+    // Counters added after this error first shipped default to 0: during a
+    // rolling deploy, workers on the older build serialize stats payloads
+    // without them, and the ScrapeRetryStats contract types them as numbers.
+    const x = new ScrapeRetryLimitError(data.reason, {
+      ...data.stats,
+      pdfFetchProxyAttempts: data.stats.pdfFetchProxyAttempts ?? 0,
+      documentFetchProxyAttempts: data.stats.documentFetchProxyAttempts ?? 0,
+    });
     x.stack = data.stack;
     return x;
   }

@@ -1,10 +1,15 @@
 import { Meta } from "../..";
 import { config } from "../../../../config";
 import { EngineScrapeResult } from "..";
-import { downloadFile, fetchFileToBuffer } from "../utils/downloadFile";
+import {
+  downloadFile,
+  fetchFileGuardingProxyFailure,
+  fetchFileToBuffer,
+} from "../utils/downloadFile";
 import { safeMarkdownToHtml } from "./markdownToHtml";
 import {
   PDFAntibotError,
+  PDFFetchProxyError,
   PDFInsufficientTimeError,
   PDFOCRRequiredError,
   PDFPrefetchFailed,
@@ -41,27 +46,26 @@ import {
 } from "../../../../lib/native-logging";
 import { withSpan, setSpanAttributes } from "../../../../lib/otel-tracer";
 import { scrapePDFWithRunPodMU } from "./runpodMU";
+import { useFireEngine } from "../fire-engine/available";
 import { reconcilePageCountWithFirePdf, scrapePDFWithFirePDF } from "./firePDF";
 import { scrapePDFWithFirePDFAsync } from "./fire-pdf/async";
 import {
   byReferenceReachableForRequest,
   largePdfLimitBytes,
   mineruDiverted,
-  rewritePdfInputForFirePdf,
-  sha256OfFile,
-  uploadPdfInputForFirePdf,
 } from "./fire-pdf/by-reference";
-import { cacheKeyShape, tryGetCached } from "./fire-pdf/cache";
+import { runFirePdfByReferenceAttempt } from "./fire-pdf/by-reference-flow";
 import { decideFirePdfAsyncRoute } from "./fire-pdf/routing";
 import { scrapePDFWithParsePDF } from "./pdfParse";
 import { toPublicBlocks } from "./blocks";
 import { captureExceptionWithZdrCheck } from "../../../../services/sentry";
 import { isPdfBuffer, PDF_SNIFF_WINDOW } from "./pdfUtils";
 import { comparePdfOutputs } from "./shadowComparison";
+import { withPdfExtractionPermit } from "./semaphore";
 
 /** Check if the PDF is eligible for Rust extraction, returning a rejection reason or null. */
 function getIneligibleReason(
-  result: ReturnType<typeof processPdf>,
+  result: Awaited<ReturnType<typeof processPdf>>,
 ): string | null {
   if (result.pdfType !== "TextBased") return `pdfType=${result.pdfType}`;
   if (result.confidence < 0.95) return `confidence=${result.confidence}`;
@@ -71,7 +75,63 @@ function getIneligibleReason(
   return null;
 }
 
+/**
+ * Guards the pdf engine's direct undici downloads: a proxy tunneling
+ * failure converts into PDFFetchProxyError, which the scrapeURL retry loop
+ * handles exactly like PDFAntibotError (clear the "pdf" flag, re-run the
+ * waterfall, browser engine fetches the file). See
+ * fetchFileGuardingProxyFailure for the conversion eligibility rules.
+ */
+function fetchPdfFileGuardingProxyFailure<T>(
+  meta: Meta,
+  fetch: () => Promise<T>,
+): Promise<T> {
+  return fetchFileGuardingProxyFailure(
+    {
+      prefetch: meta.pdfPrefetch,
+      // Convert only where the outcome is actionable: with forceEngine
+      // unset, the retry loop recovers PDFFetchProxyError via the browser
+      // fallback; with a scalar forceEngine=pdf, this engine is pinned
+      // with no fallback in the list, so the clean error surfaces instead
+      // of the raw TypeError. An ARRAY forceEngine must NOT convert — the
+      // retry loop bypasses recovery for any forceEngine, and the raw
+      // error is what lets the waterfall continue through the remaining
+      // forced engines.
+      flagMandated:
+        (meta.internalOptions.forceEngine === undefined &&
+          meta.featureFlags.has("pdf")) ||
+        meta.internalOptions.forceEngine === "pdf",
+      makeError: () => new PDFFetchProxyError(),
+    },
+    fetch,
+  );
+}
+
 export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
+  // With fire-engine available this engine never downloads files itself:
+  // buildFallbackList routes file URLs through the browser engines and the
+  // file arrives here via pdfPrefetch. Reaching the direct download means
+  // either an explicit forceEngine pin (the escape hatch, kept working) or
+  // a browser handoff that came back empty (pdfPrefetch === null) —
+  // signal antibot so the retry loop can give the browser another round
+  // trip, exactly like a handoff whose bytes failed the PDF sniff. In
+  // self-hosted deployments (no fire-engine) the direct download stays the
+  // primary path. Ordinary pages (no "pdf" flag) keep declining via
+  // EngineUnsuccessfulError so the waterfall just moves on.
+  if (
+    useFireEngine &&
+    meta.internalOptions.forceEngine === undefined &&
+    meta.pdfPrefetch == null
+  ) {
+    // A cross-type handoff (a .pdf URL serving a docx) lands in
+    // documentPrefetch: the file is in hand, just not for this engine —
+    // decline so the waterfall reaches the engine that can parse it.
+    if (meta.documentPrefetch != null || !meta.featureFlags.has("pdf")) {
+      throw new EngineUnsuccessfulError("pdf");
+    }
+    throw new PDFAntibotError();
+  }
+
   const shouldParse = shouldParsePDF(meta.options.parsers);
   const maxPages = getPDFMaxPages(meta.options.parsers);
   const mode: PDFMode = getPDFMode(meta.options.parsers);
@@ -120,19 +180,24 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
         proxyUsed: meta.pdfPrefetch.proxyUsed,
       };
     } else {
-      const file = await fetchFileToBuffer(
-        meta.rewrittenUrl ?? meta.url,
-        meta.options.skipTlsVerification,
-        {
-          headers: meta.options.headers,
-          signal: meta.abort.asSignal(),
-        },
-        PDF_DOWNLOAD_MAX_FILE_SIZE,
+      const file = await fetchPdfFileGuardingProxyFailure(meta, () =>
+        fetchFileToBuffer(
+          meta.rewrittenUrl ?? meta.url,
+          meta.options.skipTlsVerification,
+          {
+            headers: meta.options.headers,
+            signal: meta.abort.asSignal(),
+          },
+          PDF_DOWNLOAD_MAX_FILE_SIZE,
+        ),
       );
 
       if (!isPdfBuffer(file.buffer)) {
         // downloaded content isn't a valid PDF
-        if (meta.pdfPrefetch === undefined) {
+        // (null prefetch = browser round trip ran but delivered no file —
+        // still PDFAntibotError so the retry loop can give the browser
+        // another shot, exactly like the no-prefetch case)
+        if (meta.pdfPrefetch == null) {
           // for non-PDF URLs, this is expected, not anti-bot
           if (!meta.featureFlags.has("pdf")) {
             throw new EngineUnsuccessfulError("pdf");
@@ -185,20 +250,22 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
   const { response, tempFilePath } =
     meta.pdfPrefetch !== undefined && meta.pdfPrefetch !== null
       ? { response: meta.pdfPrefetch, tempFilePath: meta.pdfPrefetch.filePath }
-      : await downloadFile(
-          meta.id,
-          meta.rewrittenUrl ?? meta.url,
-          meta.options.skipTlsVerification,
-          {
-            headers: meta.options.headers,
-            signal: meta.abort.asSignal(),
-          },
-          // Parse path streams to disk and can hand large files to FirePDF
-          // by GCS reference, so it admits more than the raw fetch path —
-          // up to the requesting team's large-PDF limit.
-          byReferenceReachable
-            ? largePdfLimitBytes(meta)
-            : PDF_DOWNLOAD_MAX_FILE_SIZE,
+      : await fetchPdfFileGuardingProxyFailure(meta, () =>
+          downloadFile(
+            meta.id,
+            meta.rewrittenUrl ?? meta.url,
+            meta.options.skipTlsVerification,
+            {
+              headers: meta.options.headers,
+              signal: meta.abort.asSignal(),
+            },
+            // Parse path streams to disk and can hand large files to FirePDF
+            // by GCS reference, so it admits more than the raw fetch path —
+            // up to the requesting team's large-PDF limit.
+            byReferenceReachable
+              ? largePdfLimitBytes(meta)
+              : PDF_DOWNLOAD_MAX_FILE_SIZE,
+          ),
         );
 
   try {
@@ -218,7 +285,10 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
     }
 
     if (!isPdfBuffer(header.subarray(0, headerBytesRead))) {
-      if (meta.pdfPrefetch === undefined) {
+      // (null prefetch = browser round trip ran but delivered no file —
+      // still PDFAntibotError so the retry loop can give the browser
+      // another shot, exactly like the no-prefetch case)
+      if (meta.pdfPrefetch == null) {
         if (!meta.featureFlags.has("pdf")) {
           throw new EngineUnsuccessfulError("pdf");
         } else {
@@ -263,7 +333,9 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
         };
         const startedAt = Date.now();
         const detection = await withSpan("native.pdf.detect", async span => {
-          const result = detectPdf(tempFilePath, nativeCtx);
+          const result = await withPdfExtractionPermit(() =>
+            detectPdf(tempFilePath, nativeCtx),
+          );
           setSpanAttributes(span, {
             "native.module": "pdf",
             "native.pdf_type": result.pdfType,
@@ -312,10 +384,8 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
         };
         const startedAt = Date.now();
         const pdfResult = await withSpan("native.pdf.process", async span => {
-          const result = processPdf(
-            tempFilePath,
-            maxPages ?? undefined,
-            nativeCtx,
+          const result = await withPdfExtractionPermit(() =>
+            processPdf(tempFilePath, maxPages ?? undefined, nativeCtx),
           );
           setSpanAttributes(span, {
             "native.module": "pdf",
@@ -475,164 +545,30 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
             },
           );
         } else {
-          // Cache BEFORE upload: the raw-byte sha is the by-reference cache
-          // identity, and it must be checked before the 30-256MB transfer —
-          // a repeat scrape of the same document should cost one streamed
-          // disk read, not a full re-upload. scrapePDFWithFirePDFAsync
-          // deliberately skips the by-reference lookup for the same reason
-          // (it runs post-upload) and only saves.
-          //
-          // The local hash also verifies a fire-engine handoff before the
-          // server-side copy, so it is computed whenever a handoff carries
-          // a sha — even for uncacheable requests (maxPages), which skip
-          // only the cache LOOKUP. Requests with neither use skip the
-          // pre-hash entirely; the upload hashes in-pipeline. A failed
-          // pre-hash falls through to the upload path (legacy fallback
-          // semantics), never errors the scrape.
-          const handoff = meta.pdfPrefetch?.gcsReference;
-          const { cacheable: byRefCacheable } = cacheKeyShape(
+          // The whole attempt — raw-sha cache, content adoption, handoff
+          // rewrite / streaming upload, fresh async submit — lives in
+          // by-reference-flow.ts; this router only gates and reconciles.
+          // A null return means the input never made it into the fire-pdf
+          // bucket: fall through to the legacy chain, whose oversized-skip
+          // warning below still fires (pre-by-reference behavior).
+          const byRefResult = await runFirePdfByReferenceAttempt({
+            meta,
+            tempFilePath,
+            fileSizeBytes,
+            pagesEstimate: effectivePageCount,
             mode,
             maxPages,
             includePageMarkdown,
             includeBlocks,
             pageMarkers,
-          );
-          let localSha256: string | undefined;
-          if (byRefCacheable || handoff?.sha256 !== undefined) {
-            try {
-              localSha256 = await sha256OfFile(
-                tempFilePath,
-                meta.abort.asSignal(),
-              );
-            } catch (error) {
-              meta.logger.warn(
-                "Pre-upload hash of large PDF failed; continuing without cache lookup",
-                {
-                  method: "scrapePDF/firePdfByReference",
-                  error,
-                  scrape_id: meta.id,
-                },
-              );
-            }
-          }
-          const cachedByRef =
-            byRefCacheable && localSha256
-              ? await tryGetCached(
-                  meta,
-                  { key: `raw-${localSha256}` },
-                  mode,
-                  maxPages,
-                  effectivePageCount,
-                  includePageMarkdown,
-                  includeBlocks,
-                  pageMarkers,
-                )
-              : null;
-          // A scrape cancelled during the hash/lookup must not return a
-          // success out of the cache.
-          meta.abort.throwIfAborted();
-          if (cachedByRef) {
-            result = cachedByRef;
+          });
+          if (byRefResult) {
+            result = byRefResult;
             effectivePageCount = reconcilePageCountWithFirePdf(
               effectivePageCount,
               result,
             );
           }
-          // On a miss: when fire-engine already handed the file off via
-          // GCS, a server-side rewrite moves it into the fire-pdf input
-          // bucket without the bytes transiting this process; otherwise
-          // (or if the rewrite fails) stream-upload the local temp file.
-          // The handoff hash becomes fire-pdf's idempotency identity, so it
-          // must match the raw-byte sha already computed for the cache
-          // check above (no second disk read needed); any mismatch falls
-          // back to the hashing upload.
-          const handoffShaMatches =
-            localSha256 !== undefined &&
-            handoff?.sha256 !== undefined &&
-            handoff.sha256.toLowerCase() === localSha256;
-          if (
-            localSha256 !== undefined &&
-            handoff?.sha256 !== undefined &&
-            !handoffShaMatches
-          ) {
-            meta.logger.warn(
-              "fire-engine handoff sha256 does not match local bytes; using streaming upload",
-              {
-                method: "scrapePDF/firePdfByReference",
-                event: "fire_pdf_handoff_sha_mismatch",
-                scrape_id: meta.id,
-              },
-            );
-          }
-          const rewriteEligible =
-            !result &&
-            handoffShaMatches &&
-            handoff!.sizeBytes === fileSizeBytes;
-          const uploaded = result
-            ? null
-            : ((rewriteEligible && handoff
-                ? await rewritePdfInputForFirePdf(meta, {
-                    uri: handoff.uri,
-                    // rewriteEligible implies handoffShaMatches implies defined
-                    sha256: localSha256!,
-                    sizeBytes: fileSizeBytes,
-                    generation: handoff.generation,
-                  })
-                : null) ??
-              // A distinct key when a rewrite was attempted: a timed-out
-              // copy may still complete and must never overwrite this
-              // upload.
-              (await uploadPdfInputForFirePdf(
-                meta,
-                tempFilePath,
-                fileSizeBytes,
-                {
-                  keyVariant: rewriteEligible ? "s" : undefined,
-                  precomputedSha256: localSha256,
-                },
-              )));
-          if (uploaded) {
-            try {
-              result = await scrapePDFWithFirePDFAsync(
-                {
-                  ...meta,
-                  logger: meta.logger.child({
-                    method: "scrapePDF/firePDFAsyncByReference",
-                  }),
-                },
-                uploaded,
-                maxPages,
-                effectivePageCount,
-                mode,
-                undefined,
-                includePageMarkdown,
-                includeBlocks,
-                pageMarkers,
-              );
-              effectivePageCount = reconcilePageCountWithFirePdf(
-                effectivePageCount,
-                result,
-              );
-            } catch (error) {
-              // No inline retry exists at this size, and the legacy chain
-              // below would silently degrade a large document to text-only
-              // extraction. Surface the failure instead.
-              meta.logger.error(
-                "FirePDF by-reference scrape failed (no fallback at this size)",
-                {
-                  method: "scrapePDF/firePDFAsyncByReference",
-                  error,
-                  file_size_bytes: fileSizeBytes,
-                  scrape_id: meta.id,
-                  team_id: meta.internalOptions.teamId,
-                },
-              );
-              throw error;
-            }
-          }
-          // Upload failure: fall through to the legacy chain — the
-          // oversized-skip warning below still fires, preserving the
-          // pre-by-reference behavior.
         }
       }
     }
@@ -1000,7 +936,10 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
       },
 
       contentType: "application/pdf",
-      proxyUsed: "basic",
+      // Report the proxy that actually delivered the file: a browser
+      // handoff may have come through the stealth proxy, while the direct
+      // download always uses the basic route.
+      proxyUsed: meta.pdfPrefetch?.proxyUsed ?? "basic",
     };
   } finally {
     // Always clean up temp file after we're done with it
