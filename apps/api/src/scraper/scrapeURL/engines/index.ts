@@ -9,6 +9,7 @@ import {
 } from "./fire-engine";
 import { exchangeMaxReasonableTime, scrapeURLWithExchange } from "./exchange";
 import { pdfMaxReasonableTime, scrapePDF } from "./pdf";
+import { imageMaxReasonableTime, scrapeImage } from "./image";
 import { fetchMaxReasonableTime, scrapeURLWithFetch } from "./fetch";
 import {
   playwrightMaxReasonableTime,
@@ -41,8 +42,10 @@ import {
   NoCachedDataError,
 } from "../error";
 import { isUrlBlocked } from "../../WebScraper/utils/blocklist";
+import { hasCustomRequestContext } from "../lib/request-context";
 import {
-  canUseExchangeForRequest,
+  getExchangeAccessForRequest,
+  ThirdPartyDataTermsRequiredError,
   type ExchangeScrapeMetadata,
 } from "../../../lib/exchange";
 
@@ -58,6 +61,7 @@ export type Engine =
   | "fetch"
   | "pdf"
   | "document"
+  | "image"
   | "index"
   | "index;documents"
   | "wikipedia"
@@ -93,6 +97,10 @@ const engines: Engine[] = [
   "fetch",
   "pdf",
   "document",
+  // Image OCR needs FirePDF; without it the engine would only be a wasted
+  // tail download on every failed scrape. Whether images are actually OCR'd
+  // is decided where they are routed (lib/image-ocr-gate.ts), not here.
+  ...(config.FIRE_PDF_BASE_URL ? ["image" as const] : []),
 ];
 
 const featureFlags = [
@@ -102,6 +110,7 @@ const featureFlags = [
   "screenshot@fullScreen",
   "pdf",
   "document",
+  "image",
   "audio",
   "video",
   "atsv",
@@ -127,6 +136,7 @@ const featureFlagOptions: {
   "screenshot@fullScreen": { priority: 10 },
   pdf: { priority: 100 },
   document: { priority: 100 },
+  image: { priority: 100 },
   audio: { priority: 100 },
   video: { priority: 100 },
   atsv: { priority: 90 }, // NOTE: should atsv force to tlsclient? adjust priority if not
@@ -147,7 +157,6 @@ export type EngineScrapeResult = {
   markdown?: string;
   pages?: Array<{ pageNumber: number; markdown: string }>;
   blocks?: PdfPageBlocks[];
-  json?: unknown;
   statusCode: number;
   error?: string;
 
@@ -197,6 +206,7 @@ const engineHandlers: {
   fetch: scrapeURLWithFetch,
   pdf: scrapePDF,
   document: scrapeDocument,
+  image: scrapeImage,
   wikipedia: scrapeURLWithWikipedia,
   "x-twitter": scrapeURLWithXTwitter,
 };
@@ -223,6 +233,7 @@ const engineMRTs: {
   fetch: fetchMaxReasonableTime,
   pdf: pdfMaxReasonableTime,
   document: documentMaxReasonableTime,
+  image: imageMaxReasonableTime,
   wikipedia: wikipediaMaxReasonableTime,
   "x-twitter": xTwitterMaxReasonableTime,
 };
@@ -245,6 +256,7 @@ const engineOptions: {
       "screenshot@fullScreen": false,
       pdf: false,
       document: false,
+      image: false,
       audio: false,
       video: false,
       atsv: false,
@@ -266,6 +278,7 @@ const engineOptions: {
       "screenshot@fullScreen": true,
       pdf: false,
       document: false,
+      image: false,
       audio: false,
       video: false,
       atsv: false,
@@ -287,6 +300,7 @@ const engineOptions: {
       "screenshot@fullScreen": true, // through actions transform
       pdf: false,
       document: false,
+      image: false,
       audio: true,
       video: true,
       atsv: false,
@@ -308,6 +322,7 @@ const engineOptions: {
       "screenshot@fullScreen": true, // through actions transform
       pdf: false,
       document: false,
+      image: false,
       audio: true,
       video: true,
       atsv: false,
@@ -329,6 +344,7 @@ const engineOptions: {
       "screenshot@fullScreen": true,
       pdf: true,
       document: true,
+      image: true,
       audio: false,
       video: false,
       atsv: false,
@@ -350,6 +366,7 @@ const engineOptions: {
       "screenshot@fullScreen": true, // through actions transform
       pdf: false,
       document: false,
+      image: false,
       audio: true,
       video: true,
       atsv: false,
@@ -371,6 +388,7 @@ const engineOptions: {
       "screenshot@fullScreen": true, // through actions transform
       pdf: false,
       document: false,
+      image: false,
       audio: true,
       video: true,
       atsv: false,
@@ -392,6 +410,7 @@ const engineOptions: {
       "screenshot@fullScreen": false,
       pdf: false,
       document: false,
+      image: false,
       audio: false,
       video: false,
       atsv: false,
@@ -413,6 +432,7 @@ const engineOptions: {
       "screenshot@fullScreen": false,
       pdf: false,
       document: false,
+      image: false,
       audio: true,
       video: true,
       atsv: true,
@@ -434,6 +454,7 @@ const engineOptions: {
       "screenshot@fullScreen": false,
       pdf: false,
       document: false,
+      image: false,
       audio: true,
       video: true,
       atsv: true,
@@ -455,6 +476,7 @@ const engineOptions: {
       "screenshot@fullScreen": false,
       pdf: false,
       document: false,
+      image: false,
       audio: false,
       video: false,
       atsv: false,
@@ -468,6 +490,11 @@ const engineOptions: {
     },
     quality: 5,
   },
+  // The file engines (pdf, document, image) pass skipTlsVerification through
+  // to their direct downloads, and a browser handoff already applied it
+  // upstream, so they declare it supported: otherwise every cache-miss file
+  // scrape carries a misleading "may be partial" warning, since v2 defaults
+  // the option to true.
   pdf: {
     features: {
       actions: false,
@@ -476,12 +503,13 @@ const engineOptions: {
       "screenshot@fullScreen": false,
       pdf: true,
       document: false,
+      image: false,
       audio: false,
       video: false,
       atsv: false,
       location: false,
       mobile: false,
-      skipTlsVerification: false,
+      skipTlsVerification: true,
       useFastMode: true,
       stealthProxy: true, // kinda...
       branding: false,
@@ -497,12 +525,35 @@ const engineOptions: {
       "screenshot@fullScreen": false,
       pdf: false,
       document: true,
+      image: false,
       audio: false,
       video: false,
       atsv: false,
       location: false,
       mobile: false,
-      skipTlsVerification: false,
+      skipTlsVerification: true,
+      useFastMode: true,
+      stealthProxy: true, // kinda...
+      branding: false,
+      disableAdblock: true,
+    },
+    quality: -20,
+  },
+  image: {
+    features: {
+      actions: false,
+      waitFor: false,
+      screenshot: false,
+      "screenshot@fullScreen": false,
+      pdf: false,
+      document: false,
+      image: true,
+      audio: false,
+      video: false,
+      atsv: false,
+      location: false,
+      mobile: false,
+      skipTlsVerification: true,
       useFastMode: true,
       stealthProxy: true, // kinda...
       branding: false,
@@ -518,6 +569,7 @@ const engineOptions: {
       "screenshot@fullScreen": false,
       pdf: false,
       document: false,
+      image: false,
       audio: false,
       video: false,
       atsv: false,
@@ -539,6 +591,7 @@ const engineOptions: {
       "screenshot@fullScreen": false,
       pdf: false,
       document: false,
+      image: false,
       audio: false,
       video: false,
       atsv: false,
@@ -577,10 +630,7 @@ export function shouldUseIndex(meta: Meta) {
     !getPDFPageMarkers(meta.options.parsers) &&
     !hasCustomScreenshotSettings &&
     meta.options.maxAge !== 0 &&
-    (meta.options.headers === undefined ||
-      Object.keys(meta.options.headers).length === 0) &&
-    (meta.options.actions === undefined || meta.options.actions.length === 0) &&
-    meta.options.profile === undefined
+    !hasCustomRequestContext(meta.options)
   );
 }
 
@@ -615,27 +665,54 @@ export async function buildFallbackList(meta: Meta): Promise<
     !meta.internalOptions.agentIndexOnly &&
     meta.internalOptions.forceEngine === undefined
   ) {
-    if (
-      await canUseExchangeForRequest({
-        url: meta.rewrittenUrl ?? meta.url,
-        formats: meta.options.formats,
-        actions: meta.options.actions,
-        headers: meta.options.headers,
-        waitFor: meta.options.waitFor,
-        mobile: meta.options.mobile,
-        location: meta.options.location,
-        proxy: meta.options.proxy,
-        blockAds: meta.options.blockAds,
-        profile: meta.options.profile,
-        atsv: meta.internalOptions.atsv,
-        minAge: meta.options.minAge,
-        includeTags: meta.options.includeTags,
-        excludeTags: meta.options.excludeTags,
-        zeroDataRetention: meta.internalOptions.zeroDataRetention,
-        lockdown: meta.options.lockdown,
-        flags: meta.internalOptions.teamFlags ?? null,
-      })
-    ) {
+    const url = meta.rewrittenUrl ?? meta.url;
+    const betaTeam =
+      meta.internalOptions.teamFlags?.professionalProfileCompanyDataBeta ===
+      true;
+    let blocked = false;
+    try {
+      blocked = isUrlBlocked(url, meta.internalOptions.teamFlags ?? null, {
+        team_id: meta.internalOptions.teamId ?? null,
+        org_id: meta.internalOptions.orgId ?? null,
+        origin: null,
+        record: false,
+      });
+    } catch (error) {
+      // Beta teams fail closed, as they always have. Anyone else keeps the
+      // normal engines, since an unreadable blocklist must not fail every
+      // scrape.
+      if (betaTeam) {
+        meta.logger.warn("Exchange blocklist check failed; failing closed", {
+          error,
+        });
+        return [];
+      }
+    }
+
+    const exchangeAccess = await getExchangeAccessForRequest({
+      url,
+      teamId: meta.internalOptions.teamId ?? null,
+      orgId: meta.internalOptions.orgId ?? null,
+      blocked,
+      formats: meta.options.formats,
+      actions: meta.options.actions,
+      headers: meta.options.headers,
+      waitFor: meta.options.waitFor,
+      mobile: meta.options.mobile,
+      location: meta.options.location,
+      proxy: meta.options.proxy,
+      blockAds: meta.options.blockAds,
+      profile: meta.options.profile,
+      atsv: meta.internalOptions.atsv,
+      minAge: meta.options.minAge,
+      includeTags: meta.options.includeTags,
+      excludeTags: meta.options.excludeTags,
+      zeroDataRetention: meta.internalOptions.zeroDataRetention,
+      lockdown: meta.options.lockdown,
+      flags: meta.internalOptions.teamFlags ?? null,
+    });
+    if (exchangeAccess.allowed) {
+      meta.exchangeProviderId = exchangeAccess.provider.id;
       return [
         {
           engine: "exchange",
@@ -644,37 +721,16 @@ export async function buildFallbackList(meta: Meta): Promise<
       ];
     }
 
-    // A blocked URL can only have been admitted by the Exchange bypass in
-    // blocklistMiddleware, which only applies to flagged orgs; if the
-    // Exchange is no longer usable by execution time (catalog changed,
-    // service down), fail closed rather than letting normal engines scrape
-    // a blocklisted site. An error here also fails closed: this branch only
-    // runs for flagged orgs, and a retryable scrape failure is preferable
-    // to scraping a potentially blocklisted site with normal engines.
-    if (
-      meta.internalOptions.teamFlags?.professionalProfileCompanyDataBeta ===
-      true
-    ) {
-      try {
-        if (
-          isUrlBlocked(
-            meta.rewrittenUrl ?? meta.url,
-            meta.internalOptions.teamFlags ?? null,
-            {
-              team_id: meta.internalOptions.teamId ?? null,
-              org_id: meta.internalOptions.orgId ?? null,
-              origin: null,
-            },
-          )
-        ) {
-          return [];
-        }
-      } catch (error) {
-        meta.logger.warn("Exchange blocklist re-check failed; failing closed", {
-          error,
-        });
-        return [];
+    // A blocked URL can only have been admitted by scrapeBlocklistMiddleware
+    // for the Exchange; if the Exchange can no longer serve it (catalog
+    // changed, service down), fail closed rather than letting normal engines
+    // scrape a blocklisted site. Unblocked URLs whose provider wants
+    // unaccepted terms fall through and scrape normally.
+    if (blocked) {
+      if (exchangeAccess.termsRequired) {
+        throw new ThirdPartyDataTermsRequiredError(exchangeAccess.terms);
       }
+      return [];
     }
   }
 
@@ -744,9 +800,9 @@ export async function buildFallbackList(meta: Meta): Promise<
   // waterfall via AddFeatureError (specialtyScrapeCheck) — the same route
   // the PDFAntibotError/PDFFetchProxyError and document-equivalent
   // recoveries have always taken, just taken immediately instead of after
-  // a wasted direct download. The file engines (pdf, document) then run
-  // as pure parsers on the prefetched file, and their own direct undici
-  // downloads stay reachable only in self-hosted deployments (no
+  // a wasted direct download. The file engines (pdf, document, image)
+  // then run as pure parsers on the prefetched file, and their own direct
+  // undici downloads stay reachable only in self-hosted deployments (no
   // fire-engine) or under an explicit forceEngine pin.
   //
   // This is a bespoke list rather than a flag tweak because the pdf and
@@ -761,9 +817,11 @@ export async function buildFallbackList(meta: Meta): Promise<
     ? "document"
     : meta.featureFlags.has("pdf")
       ? "pdf"
-      : null;
+      : meta.featureFlags.has("image")
+        ? "image"
+        : null;
 
-  // A handoff of either file type ends the fetch leg: a .pdf URL can
+  // A handoff of any file type ends the fetch leg: a .pdf URL can
   // legitimately serve a docx (and vice versa), so either prefetch being
   // set means the file is already in hand and the normal waterfall below
   // routes it to the right parser.
@@ -772,6 +830,7 @@ export async function buildFallbackList(meta: Meta): Promise<
     fileFetchFlag !== null &&
     meta.pdfPrefetch === undefined &&
     meta.documentPrefetch === undefined &&
+    meta.imagePrefetch === undefined &&
     // Lockdown and agentIndexOnly pin forceEngine above, so their
     // index-only semantics win; every other explicit pin is the escape
     // hatch that keeps the file engines' direct downloads working.
@@ -784,7 +843,9 @@ export async function buildFallbackList(meta: Meta): Promise<
       throw new BrandingNotSupportedError(
         fileFetchFlag === "pdf"
           ? "Branding extraction is only supported for HTML web pages. PDFs are not supported."
-          : "Branding extraction is only supported for HTML web pages. Documents (docx, xlsx, etc.) are not supported.",
+          : fileFetchFlag === "image"
+            ? "Branding extraction is only supported for HTML web pages. Images are not supported."
+            : "Branding extraction is only supported for HTML web pages. Documents (docx, xlsx, etc.) are not supported.",
       );
     }
 
@@ -877,7 +938,11 @@ export async function buildFallbackList(meta: Meta): Promise<
     }
   }
 
-  if (isXTwitterUrl(meta.url) && _engines.includes("x-twitter")) {
+  if (
+    !meta.options.profile &&
+    isXTwitterUrl(meta.url) &&
+    _engines.includes("x-twitter")
+  ) {
     _engines.length = 0;
     _engines.push("x-twitter");
   } else if (!isXTwitterUrl(meta.url)) {
@@ -906,6 +971,17 @@ export async function buildFallbackList(meta: Meta): Promise<
       : _engines;
 
   for (const engine of currentEngines) {
+    // A profile must never fall back to fetching anonymous content. File parsers
+    // may consume bytes already fetched by the authenticated browser.
+    if (
+      meta.options.profile &&
+      !engine.includes("chrome-cdp") &&
+      !(engine === "pdf" && meta.pdfPrefetch) &&
+      !(engine === "document" && meta.documentPrefetch) &&
+      !(engine === "image" && meta.imagePrefetch)
+    )
+      continue;
+
     const supportedFlags = new Set([
       ...Object.entries(engineOptions[engine].features)
         .filter(

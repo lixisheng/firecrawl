@@ -111,6 +111,17 @@ crawl_status = firecrawl.crawl(
 print(crawl_status)
 ```
 
+The result is a `CrawlJob`. It includes the job `id` and any `warning` from the API, so you can use the job after the crawl ends, for example with `get_crawl_errors(crawl_status.id)`. If the crawl does not finish within `timeout`, the SDK raises `CrawlJobTimeoutError`. It is a `TimeoutError` subclass with a `job_id` attribute, so you can check or cancel the job later.
+
+```python
+from firecrawl import CrawlJobTimeoutError
+
+try:
+  crawl_status = firecrawl.crawl('https://firecrawl.dev', limit=100, timeout=120)
+except CrawlJobTimeoutError as e:
+  firecrawl.cancel_crawl(e.job_id)
+```
+
 ### Asynchronous Crawling
 
 <Tip>Looking for async operations? Check out the [Async Class](#async-class) section below.</Tip>
@@ -273,8 +284,13 @@ related = firecrawl.related_papers(
 )
 ```
 
-A companion `search_github` searches indexed GitHub issue/PR history and repo
-readmes.
+> **`search_github` is deprecated.** The research index GitHub endpoint stops
+> responding after 2026-11-03. Use `developer_search` instead: it searches
+> GitHub issues, pull requests and readmes plus curated documentation sources,
+> returns matched passages, and adds filters for repo, language, license and
+> stars. It does not carry over the `scores` breakdown or the
+> `resultType: "web"` fallback results. See
+> [the developer index docs](https://docs.firecrawl.dev/features/developer).
 
 > **Response keys are camelCase.** Unlike the rest of the SDK, the research
 > methods return the raw JSON body as a `dict` — they are not parsed into typed
@@ -396,3 +412,30 @@ doc_v1 = firecrawl.v1.scrape_url('https://firecrawl.dev', formats=['markdown', '
 crawl_v1 = firecrawl.v1.crawl_url('https://firecrawl.dev', limit=100)
 map_v1 = firecrawl.v1.map_url('https://firecrawl.dev')
 ```
+
+### Alexandria
+
+With a matching API deployment, `search()` returns complete contracts in `tools`.
+`domain_tools=True` adds domain matches to that same list. Find Tools provides free,
+progressive catalogue lookup; Search always requires a query.
+
+```python
+result = firecrawl.search("podcast conversations about AI agents",
+                         sources=["web", "alexandria"], domain_tools=True, limit=2)
+print(result.tools[0].options)
+
+catalogue = firecrawl.find_tools(providers=["particle"], limit=2)
+if catalogue.items and catalogue.items[0].get("next"):
+    details = firecrawl.scrape(alexandria=catalogue.items[0]["next"])
+    for item in details.alexandria:
+        if item.error:
+            print(f"Lookup failed: {item.error.message}")
+        else:
+            print(item.data)
+```
+
+Use `scrape(alexandria={"provider": ..., "capability": ..., "options": ...})` to
+execute a selected tool, or pass a list of up to ten calls. Check each item's
+`error` before using `data`. Results and execution exceptions expose `request_id`;
+reuse it with the identical payload when retrying. Automatic retries retain it.
+The same methods are available with `await` on `AsyncFirecrawl`.

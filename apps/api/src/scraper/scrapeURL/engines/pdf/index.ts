@@ -55,10 +55,13 @@ import {
   mineruDiverted,
 } from "./fire-pdf/by-reference";
 import { runFirePdfByReferenceAttempt } from "./fire-pdf/by-reference-flow";
-import { decideFirePdfAsyncRoute } from "./fire-pdf/routing";
+import {
+  decideFirePdfAsyncRoute,
+  firePdfFeaturesLabel,
+  recordFirePdfRoute,
+} from "./fire-pdf/routing";
 import { scrapePDFWithParsePDF } from "./pdfParse";
 import { toPublicBlocks } from "./blocks";
-import { captureExceptionWithZdrCheck } from "../../../../services/sentry";
 import { isPdfBuffer, PDF_SNIFF_WINDOW } from "./pdfUtils";
 import { comparePdfOutputs } from "./shadowComparison";
 import { withPdfExtractionPermit } from "./semaphore";
@@ -123,10 +126,14 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
     meta.internalOptions.forceEngine === undefined &&
     meta.pdfPrefetch == null
   ) {
-    // A cross-type handoff (a .pdf URL serving a docx) lands in
-    // documentPrefetch: the file is in hand, just not for this engine —
-    // decline so the waterfall reaches the engine that can parse it.
-    if (meta.documentPrefetch != null || !meta.featureFlags.has("pdf")) {
+    // A cross-type handoff (a .pdf URL serving a docx or an image) lands in
+    // documentPrefetch/imagePrefetch: the file is in hand, just not for this
+    // engine — decline so the waterfall reaches the engine that can parse it.
+    if (
+      meta.documentPrefetch != null ||
+      meta.imagePrefetch != null ||
+      !meta.featureFlags.has("pdf")
+    ) {
       throw new EngineUnsuccessfulError("pdf");
     }
     throw new PDFAntibotError();
@@ -366,14 +373,6 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
           error,
           url: meta.rewrittenUrl ?? meta.url,
         });
-        captureExceptionWithZdrCheck(error, {
-          extra: {
-            zeroDataRetention: meta.internalOptions.zeroDataRetention ?? false,
-            scrapeId: meta.id,
-            teamId: meta.internalOptions.teamId,
-            url: meta.rewrittenUrl ?? meta.url,
-          },
-        });
       }
     } else {
       // Rust extraction enabled (fast / auto modes).
@@ -479,14 +478,6 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
           error,
           url: meta.rewrittenUrl ?? meta.url,
         });
-        captureExceptionWithZdrCheck(error, {
-          extra: {
-            zeroDataRetention: meta.internalOptions.zeroDataRetention ?? false,
-            scrapeId: meta.id,
-            teamId: meta.internalOptions.teamId,
-            url: meta.rewrittenUrl ?? meta.url,
-          },
-        });
         // effectivePageCount stays 0 — skip time budget check
       }
     }
@@ -551,18 +542,42 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
           // A null return means the input never made it into the fire-pdf
           // bucket: fall through to the legacy chain, whose oversized-skip
           // warning below still fires (pre-by-reference behavior).
-          const byRefResult = await runFirePdfByReferenceAttempt({
-            meta,
-            tempFilePath,
-            fileSizeBytes,
-            pagesEstimate: effectivePageCount,
-            mode,
-            maxPages,
-            includePageMarkdown,
-            includeBlocks,
-            pageMarkers,
-          });
+          // Counted only once the attempt used the async transport (a
+          // result, or a throw after placement): a null return falls
+          // through to the inline chain, which records its own decision,
+          // so counting here too would double-count the request.
+          const byRefRoute = {
+            sourceKind: "pdf" as const,
+            path: "async" as const,
+            reason: "by_reference" as const,
+            features: firePdfFeaturesLabel({
+              pageMarkdown: includePageMarkdown,
+              blocks: includeBlocks,
+              pageMarkers: pageMarkers,
+            }),
+            remainingMs: meta.abort.scrapeTimeout(),
+          };
+          let byRefResult: Awaited<
+            ReturnType<typeof runFirePdfByReferenceAttempt>
+          >;
+          try {
+            byRefResult = await runFirePdfByReferenceAttempt({
+              meta,
+              tempFilePath,
+              fileSizeBytes,
+              pagesEstimate: effectivePageCount,
+              mode,
+              maxPages,
+              includePageMarkdown,
+              includeBlocks,
+              pageMarkers,
+            });
+          } catch (error) {
+            recordFirePdfRoute(meta, byRefRoute);
+            throw error;
+          }
           if (byRefResult) {
+            recordFirePdfRoute(meta, byRefRoute);
             result = byRefResult;
             effectivePageCount = reconcilePageCountWithFirePdf(
               effectivePageCount,
@@ -661,6 +676,16 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
           bulkOriginPercentage: config.FIRE_PDF_ASYNC_BULK_ORIGIN_PERCENT,
         });
         const useAsync = asyncDecision.enabled;
+        recordFirePdfRoute(meta, {
+          sourceKind: "pdf",
+          path: useAsync ? "async" : "sync",
+          reason: asyncDecision.reason,
+          features: firePdfFeaturesLabel({
+            pageMarkdown: includePageMarkdown,
+            blocks: includeBlocks,
+            pageMarkers: pageMarkers,
+          }),
+        });
         if (useAsync) {
           meta.logger.info("Routing FirePDF request to async jobs", {
             method: "scrapePDF",
@@ -878,15 +903,6 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
             "RunPod MU failed to parse PDF (could be due to timeout) -- falling back to parse-pdf",
             { error },
           );
-          captureExceptionWithZdrCheck(error, {
-            extra: {
-              zeroDataRetention:
-                meta.internalOptions.zeroDataRetention ?? false,
-              scrapeId: meta.id,
-              teamId: meta.internalOptions.teamId,
-              url: meta.rewrittenUrl ?? meta.url,
-            },
-          });
           const muV1DurationMs = Date.now() - muV1StartedAt;
           meta.logger
             .child({ method: "scrapePDF/MUv1Experiment" })

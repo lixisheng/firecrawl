@@ -29,11 +29,13 @@ covering physics, mathematics and computer science.
 
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
+import warnings
 
 from ...utils import handle_response_error
 from ...utils.http_client_async import AsyncHttpClient
 from ...utils.get_version import get_version
 from ..research_docs import (
+    GITHUB_SEARCH_DEPRECATION_MSG,
     AIO_INSPECT_PAPER_DOC,
     AIO_READ_PAPER_DOC,
     AIO_RELATED_PAPERS_DOC,
@@ -44,7 +46,11 @@ from ..research_docs import (
 
 
 BASE = "/v2/search/research"
-ORIGIN = f"python-sdk@{get_version()}"
+_DEFAULT_ORIGIN = f"python-sdk@{get_version()}"
+
+
+def _origin(client: AsyncHttpClient) -> str:
+    return getattr(client, "origin", None) or _DEFAULT_ORIGIN
 
 
 def _query(params: Dict[str, Any]) -> str:
@@ -89,7 +95,7 @@ async def search_papers(
                 "categories": categories,
                 "from": from_date,
                 "to": to_date,
-                "origin": ORIGIN,
+                "origin": _origin(client),
             }
         ),
     )
@@ -99,7 +105,7 @@ async def search_papers(
 async def inspect_paper(client: AsyncHttpClient, paper_id: str) -> Dict[str, Any]:
     return await _get(
         client,
-        f"{BASE}/papers/{quote(paper_id, safe='')}" + _query({"origin": ORIGIN}),
+        f"{BASE}/papers/{quote(paper_id, safe='')}" + _query({"origin": _origin(client)}),
     )
 
 
@@ -114,7 +120,7 @@ async def read_paper(
     return await _get(
         client,
         f"{BASE}/papers/{quote(paper_id, safe='')}"
-        + _query({"query": query, "k": k, "origin": ORIGIN}),
+        + _query({"query": query, "k": k, "origin": _origin(client)}),
     )
 
 
@@ -139,7 +145,7 @@ async def related_papers(
                 "k": k,
                 "rerank": None if rerank is None else str(rerank).lower(),
                 "anchor": anchor,
-                "origin": ORIGIN,
+                "origin": _origin(client),
             }
         ),
     )
@@ -152,7 +158,10 @@ async def search_github(
     *,
     k: Optional[int] = None,
 ) -> Dict[str, Any]:
+    # FutureWarning, not DeprecationWarning: the default filters hide the latter
+    # outside __main__, and every entry point here is several SDK frames deep.
+    warnings.warn(GITHUB_SEARCH_DEPRECATION_MSG, FutureWarning, stacklevel=2)
     return await _get(
         client,
-        BASE + "/github" + _query({"query": query, "k": k, "origin": ORIGIN}),
+        BASE + "/github" + _query({"query": query, "k": k, "origin": _origin(client)}),
     )

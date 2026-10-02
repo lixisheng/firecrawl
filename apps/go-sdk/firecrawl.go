@@ -532,7 +532,7 @@ func (c *Client) GetMonitorCheck(ctx context.Context, monitorID, checkID string,
 
 // Search performs a web search.
 func (c *Client) Search(ctx context.Context, query string, opts *SearchOptions) (*SearchData, error) {
-	if query == "" {
+	if strings.TrimSpace(query) == "" {
 		return nil, &FirecrawlError{Message: "query is required"}
 	}
 	if opts != nil && opts.Limit != nil && *opts.Limit <= 0 {
@@ -554,6 +554,13 @@ func (c *Client) Search(ctx context.Context, query string, opts *SearchOptions) 
 	if err != nil {
 		return nil, err
 	}
+	var envelope struct {
+		Warning string `json:"warning"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, err
+	}
+	data.Warning = envelope.Warning
 	return data, nil
 }
 
@@ -672,6 +679,11 @@ func (c *Client) RelatedPapers(ctx context.Context, paperID, intent string, opts
 }
 
 // SearchGitHub searches GitHub research content.
+//
+// Deprecated: stops responding after 2026-11-03. Use the developer index at
+// GET or POST /v2/search/developer. This SDK does not wrap it yet, so call it
+// directly. It does not carry over the score breakdown or the web fallback
+// results.
 func (c *Client) SearchGitHub(ctx context.Context, query string, opts *SearchGitHubOptions) (*GitHubSearchResponse, error) {
 	if query == "" {
 		return nil, &FirecrawlError{Message: "query is required"}
