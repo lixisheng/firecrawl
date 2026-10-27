@@ -1,6 +1,6 @@
 # Firecrawl Go SDK
 
-Go SDK for the [Firecrawl](https://firecrawl.dev) v2 web scraping API.
+Go SDK for [Firecrawl](https://firecrawl.dev), the context API for AI agents. Search, scrape, parse, crawl, map, and interact with the web, and run Agent and Monitor jobs on the v2 API.
 
 ## Requirements
 
@@ -175,6 +175,16 @@ doc, err := client.Parse(ctx, file, &firecrawl.ParseOptions{
 fmt.Println(doc.Markdown)
 ```
 
+List the input formats the parse endpoint accepts. `Available` is `false` when
+a format is supported but disabled on the deployment (for example, image OCR).
+
+```go
+formats, err := client.GetParseFormats(ctx)
+for _, f := range formats {
+	fmt.Println(f.Format, f.Kind, f.Extensions, f.MimeTypes, f.Available)
+}
+```
+
 ### Crawl
 
 Crawl a website and get content from multiple pages.
@@ -253,6 +263,24 @@ results, err := client.Search(ctx, "firecrawl web scraping", &firecrawl.SearchOp
 })
 ```
 
+### Developer Search
+
+Search public repositories, GitHub issues, merged pull requests, READMEs and code documentation. `DeveloperSearch` replaces the deprecated `SearchGitHub`.
+
+```go
+resp, err := client.DeveloperSearch(ctx, "retry an http request with exponential backoff", &firecrawl.DeveloperSearchOptions{
+	K:     firecrawl.Int(5),
+	Types: []string{"issue", "pull_request"},
+	Repos: []string{"golang/go"},
+})
+if err != nil {
+	log.Fatal(err)
+}
+for _, r := range resp.Results {
+	fmt.Println(r.Title, r.URL)
+}
+```
+
 ### Agent
 
 Run an AI-powered agent to extract structured data.
@@ -285,6 +313,15 @@ resp, err := client.StartAgent(ctx, &firecrawl.AgentOptions{
 })
 status, err := client.GetAgentStatus(ctx, resp.ID)
 _, err = client.CancelAgent(ctx, resp.ID)
+
+// Let the agent use Exchange data providers connected to your team
+status, err = client.Agent(ctx, &firecrawl.AgentOptions{
+	Prompt: "Summarize the latest earnings for AAPL",
+	Exchange: &firecrawl.AgentExchangeOptions{
+		Enabled:  firecrawl.Bool(true),
+		Toolkits: &[]string{"your-provider-slug"},
+	},
+})
 ```
 
 ### Browser
@@ -356,6 +393,56 @@ The SDK automatically retries transient failures:
 - **Retried:** 408, 409, 5xx errors, and connection failures
 - **Not retried:** 401, 429, and other 4xx errors
 - **Backoff:** Exponential backoff with configurable factor
+
+When every attempt fails at the transport layer, the returned `*FirecrawlError` wraps the
+last underlying error, so errors raised by a custom `http.Client` (passed with
+`option.WithHTTPClient`) can be matched with `errors.Is` or `errors.As`:
+
+```go
+var errResponseTooLarge = errors.New("response too large")
+
+const maxResponseBytes = 20 << 20
+
+type cappedBody struct {
+	io.ReadCloser
+	remaining int64
+}
+
+func (b *cappedBody) Read(p []byte) (int, error) {
+	if b.remaining <= 0 {
+		return 0, errResponseTooLarge
+	}
+	if int64(len(p)) > b.remaining {
+		p = p[:b.remaining]
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.remaining -= int64(n)
+	if b.remaining <= 0 {
+		return n, errResponseTooLarge
+	}
+	return n, err
+}
+
+type cappingTransport struct{}
+
+func (cappingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body = &cappedBody{ReadCloser: resp.Body, remaining: maxResponseBytes + 1}
+	return resp, nil
+}
+
+client, _ := firecrawl.NewClient(
+	option.WithHTTPClient(&http.Client{Transport: cappingTransport{}}),
+	option.WithMaxRetries(0),
+)
+_, err := client.Scrape(ctx, "https://example.com", nil)
+if errors.Is(err, errResponseTooLarge) {
+	// The response exceeded maxResponseBytes.
+}
+```
 
 ## Context Support
 

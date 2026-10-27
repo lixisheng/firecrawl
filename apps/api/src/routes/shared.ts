@@ -13,6 +13,7 @@ import { createIdempotencyKey } from "../services/idempotency/create";
 import { validateIdempotencyKey } from "../services/idempotency/validate";
 import { isUrlBlocked } from "../scraper/WebScraper/utils/blocklist";
 import { logger } from "../lib/logger";
+import { logAuthDenied } from "../lib/auth-denied-log";
 import {
   httpRequestDurationSeconds,
   getRoutePattern,
@@ -23,13 +24,16 @@ import { isSelfHosted } from "../lib/deployment";
 import { validate as isUuid } from "uuid";
 
 import { config } from "../config";
-import { getAgentFreeRequestsLeft } from "../db/rpc";
+import { CREDIT_CHECK_EXEMPT_TEAM_ID } from "../controllers/v2/agent-credit-gate";
 import {
   autumnService,
   CREDITS_FEATURE_ID,
 } from "../services/autumn/autumn.service";
 import { getTeamBalance } from "../services/autumn/usage";
-import { ThirdPartyDataTermsRequiredError } from "../lib/exchange";
+import {
+  ThirdPartyDataTermsRequiredError,
+  ThirdPartyDataUnsupportedOptionError,
+} from "../lib/exchange";
 import { getExchangeAccessForRequestBody } from "../lib/exchange-request";
 import { isToolsOnlySearch } from "../search/alexandria";
 import { getScrapeZDR } from "../lib/zdr-helpers";
@@ -38,6 +42,8 @@ import {
   agentInteropStatus,
   isAgentInteropSecretValid,
 } from "../lib/agent-interop";
+import { inferIntegration } from "../lib/infer-integration";
+import { resolveIntegration } from "../utils/integration";
 
 export function checkCreditsMiddleware(
   _minimum?: number,
@@ -62,6 +68,7 @@ export function checkCreditsMiddleware(
         const sponsor = req.acuc._agentSponsor;
 
         if (sponsor.status === "blocked") {
+          logAuthDenied(req, 403, "agent_key_blocked", req.acuc);
           return res.status(403).json({
             success: false,
             error: "This API key has been blocked by the account holder.",
@@ -71,6 +78,7 @@ export function checkCreditsMiddleware(
         if (sponsor.status === "pending") {
           const deadline = new Date(sponsor.verification_deadline);
           if (deadline < new Date()) {
+            logAuthDenied(req, 403, "agent_key_verification_expired", req.acuc);
             return res.status(403).json({
               success: false,
               error: "sponsor_verification_expired",
@@ -142,20 +150,10 @@ export function checkCreditsMiddleware(
         }
       }
 
+      // The agent controller gates credits itself, after it has consumed a
+      // free request: only a consumed one may skip the check.
       if (req.path.startsWith("/agent")) {
-        if (config.USE_DB_AUTHENTICATION) {
-          try {
-            const data = await getAgentFreeRequestsLeft(req.auth.team_id);
-            if (data?.[0]?.free_requests_left !== 0) {
-              return next();
-            }
-          } catch (freeRequestError) {
-            logger.warn("Failed to get agent free requests left", {
-              error: freeRequestError,
-              teamId: req.auth.team_id,
-            });
-          }
-        }
+        return next();
       }
 
       const requestedCredits = minimum ?? 1;
@@ -192,11 +190,6 @@ export function checkCreditsMiddleware(
         req.account = { remainingCredits: Infinity };
         return next();
       }
-
-      // Keep the authoritative balance available to opt-in response guidance.
-      // `req.account.remainingCredits` deliberately becomes Infinity when
-      // Autumn allows overage, so it cannot carry this informational signal.
-      res.locals.agentCreditsRemaining = autumnResult.remaining;
 
       const success = autumnResult.allowed;
       // When Autumn allows the request (including overage), don't let a
@@ -235,7 +228,6 @@ export function checkCreditsMiddleware(
               teamId: req.auth.team_id,
               remainingCredits,
               clampedLimit,
-              request: req.body,
             });
             (req.body as any).limit = clampedLimit;
             return next();
@@ -249,13 +241,12 @@ export function checkCreditsMiddleware(
             teamId: req.auth.team_id,
             minimum,
             remainingCredits,
-            request: req.body,
             path: req.path,
           },
         );
         if (
           !res.headersSent &&
-          req.auth.team_id !== "8c528896-7882-4587-a4b6-768b721b0b53"
+          req.auth.team_id !== CREDIT_CHECK_EXEMPT_TEAM_ID
         ) {
           return res.status(402).json({
             success: false,
@@ -313,6 +304,9 @@ export function authMiddleware(
           if (auth.status === 401 || auth.agentAuthDiscovery) {
             applyAgentAuthDiscoveryHeader(res);
           }
+          if (auth.retryAfterSeconds) {
+            res.setHeader("Retry-After", String(auth.retryAfterSeconds));
+          }
           return res.status(auth.status).json({
             success: false,
             error: auth.error,
@@ -334,6 +328,35 @@ export function authMiddleware(
       next();
     })().catch(err => next(err));
   };
+}
+
+/**
+ * Sets the body `integration` via resolveIntegration, then infers a still
+ * missing one. An invalid header is ignored.
+ */
+export function inferIntegrationMiddleware(
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+) {
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return next();
+  }
+
+  const resolved = resolveIntegration(body.integration, req);
+  if (resolved !== undefined) {
+    body.integration = resolved;
+  } else if (config.INFER_INTEGRATION_ENABLED) {
+    const inferred = inferIntegration({
+      origin: req.get("origin"),
+      referer: req.get("referer"),
+      userAgent: req.get("user-agent"),
+      bodyOrigin: body.origin,
+    });
+    if (inferred) body.integration = inferred;
+  }
+  next();
 }
 
 export function idempotencyMiddleware(
@@ -366,13 +389,13 @@ export function blocklistMiddleware(
 
 /**
  * Blocklist gate for single-URL scrape-shaped routes (scrape, crawl), where a
- * blocklisted URL still passes when the exchange engine can serve it, and
- * asks for the provider's terms when unaccepted terms are all that stands in
- * the way. Unblocked URLs never consult the Exchange here: engine selection
- * decides for them, identically on every route, and scrapes them normally
- * when terms are missing. Everything else (map, search, batch scrape,
- * monitors) keeps plain blocklist behavior - batch stays out until its jobs
- * carry the access flags the worker-side recheck needs.
+ * blocklisted URL still passes when the exchange engine can serve it, asks
+ * for the provider's terms when unaccepted terms are all that stands in the
+ * way, and names the request option that keeps a provider out. Unblocked
+ * URLs never consult the Exchange here: engine selection decides for them,
+ * identically on every route, and scrapes them normally when terms are
+ * missing. v2 batch scrape runs the same check per URL in its controller;
+ * map, search and monitors keep plain blocklist behavior.
  */
 export function scrapeBlocklistMiddleware(
   req: RequestWithMaybeACUC<any, any, any>,
@@ -429,6 +452,20 @@ function blocklistGate(
             ).response(),
           );
       }
+
+      if (
+        !exchangeAccess.termsRequired &&
+        exchangeAccess.unsupportedOption !== undefined &&
+        !res.headersSent
+      ) {
+        return res
+          .status(400)
+          .json(
+            new ThirdPartyDataUnsupportedOptionError(
+              exchangeAccess.unsupportedOption,
+            ).response(),
+          );
+      }
     }
 
     if (!res.headersSent) {
@@ -447,28 +484,6 @@ export function countryCheck(
   next: NextFunction,
 ) {
   if (req.acuc?.flags?.skipCountryCheck) {
-    return next();
-  }
-
-  const couldBeRestricted =
-    req.body &&
-    (req.body.actions ||
-      (req.body.headers &&
-        typeof req.body.headers === "object" &&
-        Object.keys(req.body.headers).length > 0) ||
-      req.body.agent ||
-      req.body.jsonOptions?.agent ||
-      req.body.extract?.agent ||
-      req.body.scrapeOptions?.actions ||
-      (req.body.scrapeOptions?.headers &&
-        typeof req.body.scrapeOptions.headers === "object" &&
-        Object.keys(req.body.scrapeOptions.headers).length > 0) ||
-      req.body.scrapeOptions?.agent ||
-      req.body.scrapeOptions?.jsonOptions?.agent ||
-      req.body.scrapeOptions?.extract?.agent ||
-      req.path.startsWith("/v2/agent"));
-
-  if (!couldBeRestricted) {
     return next();
   }
 
@@ -492,12 +507,41 @@ export function countryCheck(
     return res.status(403).json({
       success: false,
       error: isSelfHosted()
-        ? "Use of headers, actions, and the FIRE-1 agent is not allowed by default in your country. Please check your server configuration."
-        : "Use of headers, actions, and the FIRE-1 agent is not allowed by default in your country. Please contact us at help@firecrawl.com",
+        ? "Use of headers, actions, the agent, and browser/interact sessions is not allowed by default in your country. Please check your server configuration."
+        : "Use of headers, actions, the agent, and browser/interact sessions is not allowed by default in your country. Please contact us at help@firecrawl.com",
     });
   }
 
   next();
+}
+
+export function restrictedOptionsCountryCheck(
+  req: RequestWithAuth<any, any, any>,
+  res: Response,
+  next: NextFunction,
+) {
+  const usesRestrictedOptions =
+    req.body &&
+    (req.body.actions ||
+      (req.body.headers &&
+        typeof req.body.headers === "object" &&
+        Object.keys(req.body.headers).length > 0) ||
+      req.body.agent ||
+      req.body.jsonOptions?.agent ||
+      req.body.extract?.agent ||
+      req.body.scrapeOptions?.actions ||
+      (req.body.scrapeOptions?.headers &&
+        typeof req.body.scrapeOptions.headers === "object" &&
+        Object.keys(req.body.scrapeOptions.headers).length > 0) ||
+      req.body.scrapeOptions?.agent ||
+      req.body.scrapeOptions?.jsonOptions?.agent ||
+      req.body.scrapeOptions?.extract?.agent);
+
+  if (!usesRestrictedOptions) {
+    return next();
+  }
+
+  countryCheck(req, res, next);
 }
 
 export function isValidJobId(jobId: string | undefined): jobId is string {

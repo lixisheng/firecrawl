@@ -47,3 +47,34 @@ export async function fetchResearchUpstream(options: {
     dispatcher,
   });
 }
+
+export async function fetchGovUpstream(options: {
+  query: string;
+  k?: number;
+  jurisdiction?: string;
+  court?: string;
+  courtType?: string;
+  cites?: string;
+  domain?: string;
+  headers: Record<string, string>;
+  timeoutMs: number;
+}) {
+  const base = config.SEARCH_PLATFORM_URL;
+  if (!base) return null;
+
+  return fetch(base.replace(/\/+$/, "") + "/api/v1/gov-search", {
+    method: "POST",
+    headers: { ...options.headers, "content-type": "application/json" },
+    body: JSON.stringify({
+      query: options.query,
+      top_k: options.k,
+      jurisdiction: options.jurisdiction,
+      court: options.court,
+      court_type: options.courtType,
+      cites: options.cites,
+      domain: options.domain,
+    }),
+    signal: AbortSignal.timeout(options.timeoutMs),
+    dispatcher,
+  });
+}

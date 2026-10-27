@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from "express";
 import { externalRequestId } from "../../lib/external-request-id";
 import { config } from "../../config";
+import { timingSafeSecretEqual } from "../../lib/secret-compare";
 import {
   RequestWithAuth,
   SearchRequest,
@@ -51,9 +52,20 @@ import {
   formatTypesOf,
 } from "../../lib/key-restriction";
 import { wantsDeveloperCategory } from "../../search/developer";
+import { wantsGovCategory } from "../../search/gov";
+import {
+  indexDailyLimitRefusal,
+  reserveIndexCalls,
+} from "../../lib/index-daily-limit";
 import { requestOrigin } from "../../lib/request-origin";
 import { isAgentInteropSecretValid } from "../../lib/agent-interop";
 import { applyNotice, type Notice } from "../../lib/deprecations";
+import { markAlexandriaActivity } from "../../lib/alexandria-activity";
+import { recordDiscoveredTools } from "../../lib/alexandria-discovery";
+import {
+  autoToolsEnabled,
+  queryInferenceEnabled,
+} from "../../search/tool-intent";
 
 const RESEARCH_CATEGORY_NOTICE: Notice = {
   message:
@@ -133,9 +145,10 @@ async function searchControllerInner(
   });
 
   const middlewareTime = controllerStartTime - middlewareStartTime;
-  const isSearchPreview =
-    config.SEARCH_PREVIEW_TOKEN !== undefined &&
-    config.SEARCH_PREVIEW_TOKEN === req.body.__searchPreviewToken;
+  const isSearchPreview = timingSafeSecretEqual(
+    req.body.__searchPreviewToken,
+    config.SEARCH_PREVIEW_TOKEN,
+  );
 
   let zeroDataRetention = teamForcedKind !== null;
   let reservedKeylessCredits = 0;
@@ -144,6 +157,10 @@ async function searchControllerInner(
   try {
     const rawOrigin =
       typeof req.body?.origin === "string" ? req.body.origin : undefined;
+    delete (req.body as Record<string, unknown>)?.objective;
+    delete (req.body as Record<string, unknown>)?.clientModel;
+    const sourcesOmitted =
+      (req.body as Record<string, unknown>)?.sources === undefined;
     req.body = searchRequestSchema.parse(req.body);
 
     const wantsTools = req.body.sources.some(
@@ -192,16 +209,28 @@ async function searchControllerInner(
       });
     }
 
-    if (wantsDeveloperCategory(req.body.categories as CategoryOption[])) {
-      const developerRestriction = await checkKeyEndpointRestriction(
-        "/v2/developer/search",
+    const categories = req.body.categories as CategoryOption[];
+    // Index categories reach the same upstream as their dedicated endpoint, so
+    // they share its key restriction and its request ledger.
+    const indexCategory = wantsDeveloperCategory(categories)
+      ? { endpoint: "/v2/developer/search", table: "code_searches" as const }
+      : wantsGovCategory(categories)
+        ? {
+            endpoint: "/v2/search/gov",
+            table: "gov_searches" as const,
+          }
+        : null;
+
+    if (indexCategory) {
+      const indexRestriction = await checkKeyEndpointRestriction(
+        indexCategory.endpoint,
         req.acuc?.api_key_id,
         req.acuc?.flags ?? null,
       );
-      if (!developerRestriction.allowed) {
-        return res.status(developerRestriction.status).json({
+      if (!indexRestriction.allowed) {
+        return res.status(indexRestriction.status).json({
           success: false,
-          error: developerRestriction.error,
+          error: indexRestriction.error,
         });
       }
     }
@@ -353,13 +382,18 @@ async function searchControllerInner(
     }
 
     const toolsOnly = isToolsOnlySearch(req.body.sources, req.body.categories);
+    const govSearch = wantsGovCategory(categories);
     const projectedKeylessCredits =
-      !isSearchPreview && shouldBill && !toolsOnly
+      !isSearchPreview &&
+      shouldBill &&
+      !toolsOnly &&
+      (!govSearch || requestedFormats.length > 0)
         ? projectSearchTotalCredits(
             {
               limit: req.body.limit,
               enterprise: req.body.enterprise,
               scrapeOptions: req.body.scrapeOptions,
+              freeSearch: govSearch,
             },
             req.acuc?.flags ?? null,
             zeroDataRetention,
@@ -390,6 +424,27 @@ async function searchControllerInner(
       reservedKeylessCredits = projectedKeylessCredits;
     }
 
+    if (wantsGovCategory(categories)) {
+      const indexBudget = await reserveIndexCalls(
+        "gov",
+        req.auth.team_id,
+        req.acuc?.rate_limit_multiplier ?? 1,
+        1,
+      );
+      if (!indexBudget.ok) {
+        if (reservedKeylessCredits > 0) {
+          await adjustKeylessCredits(req.auth.team_id, -reservedKeylessCredits);
+          reconciledKeylessCredits = true;
+        }
+        res.setHeader("Retry-After", String(indexBudget.retryAfterSeconds));
+        return res.status(429).json({
+          success: false,
+          code: "INDEX_DAILY_LIMIT",
+          ...indexDailyLimitRefusal("gov", req.auth.team_id, indexBudget),
+        });
+      }
+    }
+
     const result = await executeSearch(
       {
         query: req.body.query,
@@ -409,6 +464,12 @@ async function searchControllerInner(
         highlights: req.body.highlights,
         domainTools: req.body.domainTools,
         toolDetail: req.body.toolDetail,
+        inferToolQuery: queryInferenceEnabled(),
+        autoTools:
+          (sourcesOmitted || req.body.domainTools === true) &&
+          !req.auth.team_id.startsWith("preview_keyless_") &&
+          config.FIRE_EXCHANGE_URL !== undefined &&
+          autoToolsEnabled(req.acuc?.flags),
         timeout: req.body.timeout,
       },
       {
@@ -431,6 +492,33 @@ async function searchControllerInner(
       },
       logger,
     );
+
+    if (toolsOnly && result.toolsUnavailable) {
+      const error =
+        "Tool discovery is temporarily unavailable. Retry the request.";
+      setSpanAttributes(span, { "search.status_code": 503 });
+      logSearch({
+        id: jobId,
+        request_id: agentRequestId ?? jobId,
+        query: req.body.query,
+        is_successful: false,
+        error,
+        results: result.response as any,
+        num_results: 0,
+        time_taken: (Date.now() - middlewareStartTime) / 1000,
+        team_id: req.auth.team_id,
+        options: req.body,
+        credits_cost: 0,
+        zeroDataRetention,
+      }).catch(error => {
+        logger.error("Failed to log search", { error, jobId });
+      });
+      return res.status(503).json({
+        success: false,
+        code: "TOOL_DISCOVERY_UNAVAILABLE",
+        error,
+      });
+    }
 
     // Bill team for search credits only (scrape jobs bill themselves)
     if (!isSearchPreview && shouldBill) {
@@ -463,31 +551,30 @@ async function searchControllerInner(
     const endTime = new Date().getTime();
     const timeTakenInSeconds = (endTime - middlewareStartTime) / 1000;
 
-    logSearch(
-      {
-        id: jobId,
-        request_id: agentRequestId ?? jobId,
-        query: req.body.query,
-        is_successful: true,
-        error: undefined,
-        results: result.response as any,
-        num_results: result.totalResultsCount,
-        time_taken: timeTakenInSeconds,
-        team_id: req.auth.team_id,
-        options: req.body,
-        // Don't record preview tokens as billed in the ledger — only record
-        // credits when billing is actually applied.
-        credits_cost: !isSearchPreview && shouldBill ? result.searchCredits : 0,
-        zeroDataRetention,
-      },
-      false,
-    ).catch(error => {
+    logSearch({
+      id: jobId,
+      request_id: agentRequestId ?? jobId,
+      query: req.body.query,
+      is_successful: true,
+      error: undefined,
+      results: result.response as any,
+      num_results: result.totalResultsCount,
+      num_results_by_source: result.resultCountsBySource,
+      result_categories: result.resultCategories,
+      time_taken: timeTakenInSeconds,
+      team_id: req.auth.team_id,
+      options: req.body,
+      // Don't record preview tokens as billed in the ledger — only record
+      // credits when billing is actually applied.
+      credits_cost: !isSearchPreview && shouldBill ? result.searchCredits : 0,
+      zeroDataRetention,
+    }).catch(error => {
       logger.error("Failed to log search", { error, jobId });
     });
 
-    if (wantsDeveloperCategory(req.body.categories as CategoryOption[])) {
+    if (indexCategory) {
       logResearchEndpoint({
-        table: "code_searches",
+        table: indexCategory.table,
         id: uuidv7(),
         request_id: agentRequestId ?? jobId,
         team_id: req.auth.team_id,
@@ -500,7 +587,7 @@ async function searchControllerInner(
           via: "search_category",
         },
         response: null,
-        num_results: result.developerResultsCount,
+        num_results: result.indexResultsCount,
         time_taken: timeTakenInSeconds,
         // Ensure preview-mode searches don't get a non-zero credits_cost
         // in the research ledger when preview tokens are used.
@@ -508,7 +595,7 @@ async function searchControllerInner(
         is_successful: true,
         zeroDataRetention,
       }).catch(ledgerError => {
-        logger.warn("Failed to log developer category usage", {
+        logger.warn("Failed to log index category usage", {
           error: ledgerError,
         });
       });
@@ -532,6 +619,15 @@ async function searchControllerInner(
       scrapeful: result.shouldScrape,
     });
 
+    if (result.response.tools) {
+      markAlexandriaActivity(req.auth.team_id);
+      recordDiscoveredTools(
+        req.auth.team_id,
+        result.toolsAuto ? "auto_search" : "search",
+        jobId,
+        result.response.tools,
+      );
+    }
     return res.status(200).json({
       success: true,
       data: result.response,

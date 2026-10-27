@@ -2,6 +2,7 @@ import { Response } from "express";
 import { providerScrapeController } from "./scrape-alexandria";
 import { discoverTools } from "../../search/alexandria";
 import { config } from "../../config";
+import { timingSafeSecretEqual } from "../../lib/secret-compare";
 import { logger as _logger } from "../../lib/logger";
 import {
   Document,
@@ -50,8 +51,9 @@ import { projectScrapeCredits } from "../../lib/keyless-credit-projection";
 import { applyAgentAuthDiscoveryHeader } from "../../lib/agent-auth-discovery";
 import { resolveThreatProtection } from "../../lib/threat-protection/request";
 import { emitRejectedScrapeActivityEvent } from "../../lib/siem-logging";
-import { getEffectiveConcurrencyLimit } from "../../lib/concurrency-limit";
 import { isAgentInteropSecretValid } from "../../lib/agent-interop";
+import { markAlexandriaActivity } from "../../lib/alexandria-activity";
+import { DEFAULT_TEAM_LIMITS } from "../../services/autumn/autumn.service";
 
 const AGENT_INTEROP_CONCURRENCY_BOOST = 3;
 
@@ -245,9 +247,10 @@ export async function scrapeController(
       const agentRequestId = req.body.__agentInterop?.requestId ?? null;
       const boostConcurrency =
         req.body.__agentInterop?.boostConcurrency ?? false;
-      const isDirectToBullMQ =
-        config.SEARCH_PREVIEW_TOKEN !== undefined &&
-        config.SEARCH_PREVIEW_TOKEN === req.body.__searchPreviewToken;
+      const isDirectToBullMQ = timingSafeSecretEqual(
+        req.body.__searchPreviewToken,
+        config.SEARCH_PREVIEW_TOKEN,
+      );
       const projectedKeylessCredits =
         shouldBill && !isDirectToBullMQ
           ? projectScrapeCredits(
@@ -351,10 +354,8 @@ export async function scrapeController(
         }
         req.on("close", () => aborter.abort());
 
-        const baseConcurrency = await getEffectiveConcurrencyLimit(
-          req.auth.team_id,
-          req.acuc?.org_id ?? null,
-        );
+        const baseConcurrency =
+          req.acuc?.concurrency_limit ?? DEFAULT_TEAM_LIMITS.concurrency_limit;
         const concurrency = boostConcurrency
           ? baseConcurrency * AGENT_INTEROP_CONCURRENCY_BOOST
           : baseConcurrency;
@@ -368,7 +369,7 @@ export async function scrapeController(
           async limited => {
             const jobPriority = await getJobPriority({
               team_id: req.auth.team_id,
-              org_id: req.acuc?.org_id ?? null,
+              acuc: req.acuc,
               basePriority: 10,
             });
 
@@ -626,6 +627,20 @@ export async function scrapeController(
             });
           }
 
+          if (
+            e.code === "THIRD_PARTY_DATA_UNSUPPORTED_URL" ||
+            e.code === "THIRD_PARTY_DATA_UNSUPPORTED_OPTION"
+          ) {
+            setSpanAttributes(span, {
+              "scrape.status_code": 400,
+            });
+            return res.status(400).json({
+              success: false,
+              code: e.code,
+              error: e.message,
+            });
+          }
+
           const statusCode = timeoutErr ? 408 : 500;
           setSpanAttributes(span, {
             "scrape.status_code": statusCode,
@@ -709,7 +724,8 @@ export async function scrapeController(
         !!hasFormatOfType(req.body.formats, "branding") ||
         !!hasFormatOfType(req.body.formats, "question") ||
         !!hasFormatOfType(req.body.formats, "highlights") ||
-        !!hasFormatOfType(req.body.formats, "query");
+        !!hasFormatOfType(req.body.formats, "query") ||
+        req.body.checkPromptInjection;
 
       if (!usedLlm) {
         const ct = hasFormatOfType(req.body.formats, "changeTracking");
@@ -742,6 +758,7 @@ export async function scrapeController(
           ? await discoverTools(
               {
                 teamId: req.auth.team_id,
+                connectors: req.acuc?.flags?.exchangeRetrieve === true,
                 toolDetail: req.body.toolDetail,
                 urls: [
                   ...new Set(
@@ -761,6 +778,7 @@ export async function scrapeController(
               return undefined;
             })
           : undefined;
+      if (tools) markAlexandriaActivity(req.auth.team_id);
 
       return res.status(200).json({
         success: true,

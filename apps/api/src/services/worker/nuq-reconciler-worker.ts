@@ -6,6 +6,16 @@ import { reconcileConcurrencyQueue } from "../../lib/concurrency-queue-reconcile
 import { repairCrawlJobDoneMarkers } from "../../lib/crawl-redis";
 import { Counter, register } from "prom-client";
 import Express from "express";
+import { startNodeRuntimeMetrics } from "../../lib/node-runtime-metrics";
+import { Worker } from "bullmq";
+import {
+  getFirebillTrackRetryQueue,
+  getRedisConnection,
+} from "../queue-service";
+import {
+  firebillConfigured,
+  processFirebillTrackRetry,
+} from "../autumn/firebill";
 
 const RECONCILER_INTERVAL_MS = 60 * 1000;
 
@@ -29,6 +39,7 @@ const reconcilerJobsRecoveredTotal = new Counter({
   let reconcilerInFlight = false;
 
   const app = Express();
+  startNodeRuntimeMetrics();
 
   app.get("/metrics", async (_, res) => {
     try {
@@ -59,10 +70,26 @@ const reconcilerJobsRecoveredTotal = new Counter({
     },
   );
 
+  // Re-sends usage events firebill never confirmed. Jobs live in Redis, so
+  // one consumer is enough: if this pod goes, its delayed retries wait for
+  // the next one rather than being lost.
+  const firebillTrackRetryWorker = firebillConfigured()
+    ? new Worker(getFirebillTrackRetryQueue().name, processFirebillTrackRetry, {
+        connection: getRedisConnection(),
+        concurrency: 16,
+        maxStalledCount: 10,
+      })
+    : undefined;
+  firebillTrackRetryWorker?.on("error", error => {
+    _logger.error("firebill track retry worker error", { error });
+  });
+
   async function shutdown() {
     if (isShuttingDown) return;
     isShuttingDown = true;
     _logger.info("NuQ reconciler worker shutting down");
+
+    await firebillTrackRetryWorker?.close();
 
     while (reconcilerInFlight) {
       _logger.info("Waiting for in-flight reconciliation to complete...");

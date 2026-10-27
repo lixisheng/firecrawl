@@ -1,3 +1,12 @@
+export class ExistingCreditsLockError extends Error {
+  constructor(readonly lockId: string) {
+    super(
+      "Credit reservation already exists; execution ownership is unresolved.",
+    );
+    this.name = "ExistingCreditsLockError";
+  }
+}
+
 export type GetOrCreateCustomerParams = {
   customerId: string;
   name?: string | null;
@@ -39,6 +48,13 @@ export type TrackParams = {
    * like a crawl id (every page shares it: collision = underbilling).
    */
   idempotencyKey?: string;
+  /**
+   * firebill route only. `false` keeps an unanswered event out of the durable
+   * retry, for a caller that treats `false` as "did not happen" and releases
+   * something on it: a late retry landing would bill what it already undid.
+   * Defaults to retrying.
+   */
+  durableRetry?: boolean;
 };
 
 export type EnsureOrgProvisionedParams = {
@@ -122,6 +138,8 @@ export type TrackCreditsParams = {
   idempotencyKey?: string;
   /** See TrackParams.externalRequestId. */
   externalRequestId?: string | null;
+  /** See TrackParams.durableRetry. */
+  durableRetry?: boolean;
   /**
    * The team's org — the Autumn customer this usage bills against. The service
    * never looks it up: callers hold it already (a request's ACUC, a job's

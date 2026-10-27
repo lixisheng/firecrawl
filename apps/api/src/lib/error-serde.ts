@@ -45,12 +45,17 @@ import {
   ExchangeRefusedError,
 } from "../scraper/scrapeURL/error";
 import { UnsafeDomainBlockedError } from "./threat-protection/error";
-import { ThirdPartyDataTermsRequiredError } from "./exchange";
+import {
+  ThirdPartyDataTermsRequiredError,
+  ThirdPartyDataUnsupportedOptionError,
+} from "./exchange";
 
 // TODO: figure out correct typing for this
 const errorMap: Record<ErrorCodes, any> = {
   THIRD_PARTY_DATA_TERMS_REQUIRED: ThirdPartyDataTermsRequiredError,
   THIRD_PARTY_DATA_NOT_FOUND: ExchangeRefusedError,
+  THIRD_PARTY_DATA_UNSUPPORTED_URL: ExchangeRefusedError,
+  THIRD_PARTY_DATA_UNSUPPORTED_OPTION: ThirdPartyDataUnsupportedOptionError,
   THIRD_PARTY_DATA_NOT_ENABLED: ExchangeRefusedError,
   THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED: ExchangeRefusedError,
   SAFE_MODE_BLOCKED: null,
@@ -98,6 +103,8 @@ const errorMap: Record<ErrorCodes, any> = {
   // Zod errors
   BAD_REQUEST: null,
   BAD_REQUEST_INVALID_JSON: null,
+  INDEX_DAILY_LIMIT: null,
+  TOOL_DISCOVERY_UNAVAILABLE: null,
   PARSE_UNSUPPORTED_OPTIONS: null,
 
   // Agent thread rejections are API-level, never transported through workers.
@@ -106,6 +113,12 @@ const errorMap: Record<ErrorCodes, any> = {
   thread_expired: null,
   threads_disabled: null,
   exchange_not_enabled: null,
+
+  // Agent zero data retention rejections are API-level too.
+  zdr_threads_unsupported: null,
+  zdr_expired: null,
+  zdr_no_snapshots: null,
+  zdr_not_enabled: null,
 };
 
 export function serializeTransportableError(error: TransportableError) {

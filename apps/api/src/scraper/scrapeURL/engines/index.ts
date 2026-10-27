@@ -33,6 +33,7 @@ import {
   getPDFBlocks,
   getPDFPageMarkdown,
   getPDFPageMarkers,
+  getPDFRefresh,
 } from "../../../controllers/v2/types";
 import type { PdfMetadata, PdfPageBlocks } from "./pdf/types";
 import { BrandingProfile } from "../../../types/branding";
@@ -46,6 +47,7 @@ import { hasCustomRequestContext } from "../lib/request-context";
 import {
   getExchangeAccessForRequest,
   ThirdPartyDataTermsRequiredError,
+  ThirdPartyDataUnsupportedOptionError,
   type ExchangeScrapeMetadata,
 } from "../../../lib/exchange";
 
@@ -172,6 +174,10 @@ export type EngineScrapeResult = {
   };
 
   branding?: BrandingProfile;
+  /** First-screen screenshot taken for Jev's branding call; internal, never
+   * returned (see the branding format's __experimental_screenshot and
+   * BRANDING_JEV_SCREENSHOT_PERCENT). */
+  brandingScreenshot?: string;
 
   pdfMetadata?: PdfMetadata;
 
@@ -630,6 +636,11 @@ export function shouldUseIndex(meta: Meta) {
     !getPDFPageMarkers(meta.options.parsers) &&
     !hasCustomScreenshotSettings &&
     meta.options.maxAge !== 0 &&
+    // A PDF refresh asks for a fresh parse; a URL index copy is the parse
+    // being refreshed, so serving it would silently ignore the request.
+    !(
+      config.INDEX_SKIP_ON_PDF_REFRESH && getPDFRefresh(meta.options.parsers)
+    ) &&
     !hasCustomRequestContext(meta.options)
   );
 }
@@ -709,6 +720,7 @@ export async function buildFallbackList(meta: Meta): Promise<
       excludeTags: meta.options.excludeTags,
       zeroDataRetention: meta.internalOptions.zeroDataRetention,
       lockdown: meta.options.lockdown,
+      redactPII: meta.options.redactPII,
       flags: meta.internalOptions.teamFlags ?? null,
     });
     if (exchangeAccess.allowed) {
@@ -721,14 +733,19 @@ export async function buildFallbackList(meta: Meta): Promise<
       ];
     }
 
-    // A blocked URL can only have been admitted by scrapeBlocklistMiddleware
-    // for the Exchange; if the Exchange can no longer serve it (catalog
+    // A blocked URL can only have been admitted (by scrapeBlocklistMiddleware
+    // or batch scrape) for the Exchange; if it can no longer serve it (catalog
     // changed, service down), fail closed rather than letting normal engines
     // scrape a blocklisted site. Unblocked URLs whose provider wants
-    // unaccepted terms fall through and scrape normally.
+    // unaccepted terms or rejects an option fall through and scrape normally.
     if (blocked) {
       if (exchangeAccess.termsRequired) {
         throw new ThirdPartyDataTermsRequiredError(exchangeAccess.terms);
+      }
+      if (exchangeAccess.unsupportedOption !== undefined) {
+        throw new ThirdPartyDataUnsupportedOptionError(
+          exchangeAccess.unsupportedOption,
+        );
       }
       return [];
     }
@@ -771,10 +788,11 @@ export async function buildFallbackList(meta: Meta): Promise<
     if (
       getPDFPageMarkdown(meta.options.parsers) ||
       getPDFBlocks(meta.options.parsers) ||
-      getPDFPageMarkers(meta.options.parsers)
+      getPDFPageMarkers(meta.options.parsers) ||
+      (config.INDEX_SKIP_ON_PDF_REFRESH && getPDFRefresh(meta.options.parsers))
     ) {
       meta.logger.warn(
-        "agentIndexOnly request demands pageMarkdown/blocks/pageMarkers, which the URL index cannot serve",
+        "agentIndexOnly request demands pageMarkdown/blocks/pageMarkers or a PDF refresh, which the URL index cannot serve",
         { parsers: meta.options.parsers },
       );
       throw new AgentIndexOnlyError();

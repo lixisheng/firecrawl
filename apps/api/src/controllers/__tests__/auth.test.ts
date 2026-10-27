@@ -23,8 +23,10 @@ import { decryptKeylessSignupToken } from "../../lib/keyless-signup-link";
 import { logger } from "../../lib/logger";
 import { isKeylessIpSuspicious } from "../../lib/spur";
 import { trackKeylessPromptShown } from "../../lib/keyless-prompt-analytics";
+import { mintWorldIdCredential, worldIdSubjectHash } from "../../lib/world-id";
 import { db } from "../../db/connection";
 import { autumnService } from "../../services/autumn/autumn.service";
+import { getRateLimitExperimentVariant } from "../../services/rate-limit-experiment";
 
 vi.mock("../../services/queue-service", () => ({
   getRedisConnection: vi.fn(() => ({
@@ -96,14 +98,31 @@ vi.mock("../../lib/spur", () => ({
 }));
 
 vi.mock("../../services/autumn/autumn.service", () => ({
-  autumnService: {
-    getRateLimitMultiplier: vi.fn(),
+  DEFAULT_TEAM_LIMITS: {
+    concurrency_limit: 2,
+    rate_limit_multiplier: 1,
+    is_paid_plan: false,
   },
+  autumnService: {
+    getTeamLimits: vi.fn(),
+  },
+}));
+
+vi.mock("../../services/rate-limit-experiment", () => ({
+  getRateLimitExperimentVariant: vi.fn(),
 }));
 
 vi.mock("../../services/agent-sponsor", () => ({
   getAgentSponsorStatus: vi.fn(),
 }));
+
+function mockMultiplier(rate_limit_multiplier: number) {
+  vi.mocked(autumnService.getTeamLimits).mockResolvedValue({
+    concurrency_limit: 2,
+    rate_limit_multiplier,
+    is_paid_plan: false,
+  });
+}
 
 describe("authenticateUser", () => {
   const originalUseDbAuth = config.USE_DB_AUTHENTICATION;
@@ -117,10 +136,17 @@ describe("authenticateUser", () => {
   const originalPreviewToken = config.PREVIEW_TOKEN;
   const originalAgentInteropSecret = config.AGENT_INTEROP_SECRET;
   const originalKeylessSignupLinkKeys = config.KEYLESS_SIGNUP_LINK_KEYS;
+  const originalWorldId = {
+    WORLD_ID_ISSUER: config.WORLD_ID_ISSUER,
+    WORLD_ID_CLIENT_ID: config.WORLD_ID_CLIENT_ID,
+    WORLD_ID_CLIENT_SECRET: config.WORLD_ID_CLIENT_SECRET,
+    WORLD_ID_CREDENTIAL_SECRET: config.WORLD_ID_CREDENTIAL_SECRET,
+    WORLD_ID_SUBJECT_SECRET: config.WORLD_ID_SUBJECT_SECRET,
+  };
 
   beforeEach(() => {
     vi.mocked(isKeylessConfigured).mockReturnValue(false);
-    vi.mocked(autumnService.getRateLimitMultiplier).mockResolvedValue(1);
+    mockMultiplier(1);
     vi.mocked(getAutumnRateLimiter).mockReturnValue({
       consume: vi.fn().mockResolvedValue(undefined),
     } as never);
@@ -137,6 +163,7 @@ describe("authenticateUser", () => {
     config.PREVIEW_TOKEN = originalPreviewToken;
     config.AGENT_INTEROP_SECRET = originalAgentInteropSecret;
     config.KEYLESS_SIGNUP_LINK_KEYS = originalKeylessSignupLinkKeys;
+    Object.assign(config, originalWorldId);
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
@@ -383,6 +410,164 @@ describe("authenticateUser", () => {
     });
   });
 
+  describe("World ID keyless credential", () => {
+    const allowed = {
+      ok: true,
+      requestsUsed: 1,
+      creditsUsed: 0,
+    } as const;
+    const enableWorldId = () => {
+      config.USE_DB_AUTHENTICATION = true;
+      config.WORLD_ID_ISSUER = "https://issuer.test";
+      config.WORLD_ID_CLIENT_ID = "app_test";
+      config.WORLD_ID_CLIENT_SECRET = "client-secret";
+      config.WORLD_ID_CREDENTIAL_SECRET = "c".repeat(32);
+      config.WORLD_ID_SUBJECT_SECRET = "s".repeat(32);
+      vi.mocked(isKeylessConfigured).mockReturnValue(true);
+      vi.mocked(consumeKeylessRequest).mockResolvedValue(allowed);
+    };
+
+    it("gets its own bucket and skips the IP checks", async () => {
+      enableWorldId();
+      const hash = worldIdSubjectHash("https://issuer.test", "human-1");
+      const { credential } = mintWorldIdCredential(hash);
+
+      const auth = await authenticateUser(
+        {
+          body: { origin: "cli" },
+          headers: { "x-firecrawl-world-id": credential },
+          // IPv6 is refused on the IP path; a verified human isn't keyed on it.
+          socket: { remoteAddress: "2001:db8::1" },
+        },
+        {},
+        RateLimiterMode.Scrape,
+        { allowKeyless: true },
+      );
+
+      expect(auth).toMatchObject({
+        success: true,
+        team_id: `preview_keyless_wid_${hash}`,
+      });
+      expect(consumeKeylessRequest).toHaveBeenCalledWith(`wid_${hash}`);
+      expect(isKeylessIpSuspicious).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the IP bucket when the credential is invalid", async () => {
+      enableWorldId();
+
+      const auth = await authenticateUser(
+        {
+          body: { origin: "cli" },
+          headers: { "x-firecrawl-world-id": "fcwid_forged.credential" },
+          socket: { remoteAddress: "203.0.113.8" },
+        },
+        {},
+        RateLimiterMode.Scrape,
+        { allowKeyless: true },
+      );
+
+      expect(auth).toMatchObject({
+        success: true,
+        team_id: "preview_keyless_203.0.113.8",
+      });
+      expect(consumeKeylessRequest).toHaveBeenCalledWith("203.0.113.8");
+      expect(isKeylessIpSuspicious).toHaveBeenCalledWith("203.0.113.8");
+    });
+
+    it("is ignored while World ID is not configured", async () => {
+      enableWorldId();
+      const { credential } = mintWorldIdCredential("h".repeat(43));
+      config.WORLD_ID_CLIENT_SECRET = undefined;
+
+      const auth = await authenticateUser(
+        {
+          body: { origin: "cli" },
+          headers: { "x-firecrawl-world-id": credential },
+          socket: { remoteAddress: "2001:db8::1" },
+        },
+        {},
+        RateLimiterMode.Scrape,
+        { allowKeyless: true },
+      );
+
+      expect(auth).toMatchObject({ success: false, status: 401 });
+      expect(consumeKeylessRequest).not.toHaveBeenCalled();
+    });
+
+    const ipv4Request = (headers: Record<string, string> = {}) => ({
+      body: { origin: "cli" },
+      headers,
+      socket: { remoteAddress: "203.0.113.8" },
+    });
+
+    it("keeps IPv4 callers on the IP bucket and prompt whether or not it is configured", async () => {
+      config.KEYLESS_SIGNUP_LINK_KEYS = "AAECAwQFBgcICQoLDA0ODw==";
+      enableWorldId();
+      vi.mocked(consumeKeylessRequest).mockResolvedValue({
+        ok: false,
+        reason: "credits",
+        requestsUsed: 1,
+        creditsUsed: 100,
+      });
+      const { credential } = mintWorldIdCredential(
+        worldIdSubjectHash("https://issuer.test", "human-1"),
+      );
+      const run = (headers: Record<string, string> = {}) =>
+        authenticateUser(ipv4Request(headers), {}, RateLimiterMode.Scrape, {
+          allowKeyless: true,
+        });
+
+      const configured = await run();
+      const forged = await run({
+        "x-firecrawl-world-id": "fcwid_forged.credential",
+      });
+      config.WORLD_ID_CLIENT_ID = undefined;
+      config.WORLD_ID_CLIENT_SECRET = undefined;
+      config.WORLD_ID_CREDENTIAL_SECRET = undefined;
+      config.WORLD_ID_SUBJECT_SECRET = undefined;
+      const unset = await run();
+      const unsetWithCredential = await run({
+        "x-firecrawl-world-id": credential,
+      });
+
+      const links = [configured, forged, unset, unsetWithCredential].map(
+        auth => {
+          expect(auth).toMatchObject({ success: false, status: 429 });
+          return decodedLink((auth as { signupUrl?: string }).signupUrl);
+        },
+      );
+      expect(links[0]).toMatchObject({ ipv4: "203.0.113.8", reason: "limit" });
+      expect(links).toEqual(Array(4).fill(links[0]));
+      expect(vi.mocked(consumeKeylessRequest).mock.calls).toEqual(
+        Array(4).fill(["203.0.113.8"]),
+      );
+      expect(vi.mocked(isKeylessIpSuspicious).mock.calls).toEqual(
+        Array(4).fill(["203.0.113.8"]),
+      );
+    });
+
+    it("authenticates a credential without calling the issuer", async () => {
+      enableWorldId();
+      const fetch = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
+      vi.stubGlobal("fetch", fetch);
+      const hash = worldIdSubjectHash("https://issuer.test", "human-1");
+      const { credential } = mintWorldIdCredential(hash);
+
+      const auth = await authenticateUser(
+        ipv4Request({ "x-firecrawl-world-id": credential }),
+        {},
+        RateLimiterMode.Scrape,
+        { allowKeyless: true },
+      );
+
+      expect(auth).toMatchObject({
+        success: true,
+        team_id: `preview_keyless_wid_${hash}`,
+      });
+      expect(fetch).not.toHaveBeenCalled();
+    });
+  });
+
   it("falls back to the regular signup link and still returns the 429 when no key is configured", async () => {
     config.USE_DB_AUTHENTICATION = true;
     config.KEYLESS_SIGNUP_LINK_KEYS = undefined;
@@ -492,7 +677,7 @@ describe("authenticateUser", () => {
     vi.mocked(redlock.using).mockImplementation(
       async (_keys, _ttl, _options, fn) => fn({ aborted: false } as never),
     );
-    vi.mocked(autumnService.getRateLimitMultiplier).mockResolvedValue(1);
+    mockMultiplier(1);
     const consume = vi.fn().mockResolvedValue(undefined);
     vi.mocked(getAutumnRateLimiter).mockReturnValue({ consume } as never);
 
@@ -517,6 +702,50 @@ describe("authenticateUser", () => {
     expect(consume).not.toHaveBeenCalled();
   });
 
+  it("returns the per-minute reset as retryAfterSeconds on a keyed 429", async () => {
+    config.USE_DB_AUTHENTICATION = true;
+    vi.mocked(getValue).mockResolvedValue(null);
+    vi.mocked(authCreditUsageChunk).mockResolvedValue([
+      {
+        api_key: "00000000-0000-4000-8000-000000000000",
+        api_key_id: 1,
+        team_id: "team-limited",
+        org_id: "org-1",
+        flags: null,
+      },
+    ]);
+    vi.mocked(redlock.using).mockImplementation(
+      async (_keys, _ttl, _options, fn) => fn({ aborted: false } as never),
+    );
+    vi.mocked(getAutumnRateLimiter).mockReturnValue({
+      consume: vi.fn().mockRejectedValue({
+        msBeforeNext: 41_200,
+        consumedPoints: 11,
+        remainingPoints: 0,
+      }),
+    } as never);
+
+    const auth = await authenticateUser(
+      {
+        headers: {
+          authorization: "Bearer 00000000-0000-4000-8000-000000000000",
+        },
+        socket: { remoteAddress: "127.0.0.1" },
+      },
+      {},
+      RateLimiterMode.Scrape,
+    );
+
+    expect(auth).toEqual(
+      expect.objectContaining({
+        success: false,
+        status: 429,
+        retryAfterSeconds: 42,
+        error: expect.stringContaining("retry after 42s"),
+      }),
+    );
+  });
+
   it("accepts a signed MCP delegation through the managed credential purpose without caching", async () => {
     config.USE_DB_AUTHENTICATION = true;
     config.MCP_DELEGATED_CREDENTIAL_SECRET = "mcp-delegation-secret";
@@ -529,7 +758,7 @@ describe("authenticateUser", () => {
         flags: null,
       },
     ]);
-    vi.mocked(autumnService.getRateLimitMultiplier).mockResolvedValue(1);
+    mockMultiplier(1);
     vi.mocked(getAutumnRateLimiter).mockReturnValue({
       consume: vi.fn().mockResolvedValue(undefined),
     } as never);
@@ -551,7 +780,11 @@ describe("authenticateUser", () => {
       "11111111-1111-1111-8111-111111111111",
       "hosted_mcp_oauth",
     );
-    expect(getValue).not.toHaveBeenCalled();
+    // The team's limits may come from the team ACUC, but the credential's
+    // own ACUC is never read from or written to Redis.
+    expect(getValue).not.toHaveBeenCalledWith(
+      expect.stringMatching(/^acuc_(general|hosted_mcp_oauth)_/),
+    );
     expect(setValue).not.toHaveBeenCalled();
   });
 
@@ -756,7 +989,7 @@ describe("authenticateUser", () => {
     vi.mocked(redlock.using).mockImplementation(
       async (_keys, _ttl, _options, fn) => fn({ aborted: false } as never),
     );
-    vi.mocked(autumnService.getRateLimitMultiplier).mockResolvedValue(50);
+    mockMultiplier(50);
 
     const auth = await authenticateUser(
       {
@@ -770,9 +1003,8 @@ describe("authenticateUser", () => {
     );
 
     expect(auth.success).toBe(true);
-    // The override replaces the whole base × multiplier computation, so the
-    // Autumn multiplier is never fetched and a neutral 1 is passed instead.
-    expect(autumnService.getRateLimitMultiplier).not.toHaveBeenCalled();
+    // The override replaces the whole base × multiplier computation, so a
+    // neutral 1 is passed instead of the team's multiplier.
     expect(getAutumnRateLimiter).toHaveBeenCalledWith(
       RateLimiterMode.Scrape,
       1,
@@ -796,7 +1028,7 @@ describe("authenticateUser", () => {
     vi.mocked(redlock.using).mockImplementation(
       async (_keys, _ttl, _options, fn) => fn({ aborted: false } as never),
     );
-    vi.mocked(autumnService.getRateLimitMultiplier).mockResolvedValue(50);
+    mockMultiplier(50);
 
     const auth = await authenticateUser(
       {
@@ -810,12 +1042,94 @@ describe("authenticateUser", () => {
     );
 
     expect(auth.success).toBe(true);
-    expect(autumnService.getRateLimitMultiplier).toHaveBeenCalledTimes(1);
+    expect(autumnService.getTeamLimits).toHaveBeenCalledTimes(1);
     expect(getAutumnRateLimiter).toHaveBeenCalledWith(
       RateLimiterMode.Scrape,
       50,
       flags,
     );
+  });
+
+  describe("rate-limit experiment", () => {
+    const request = {
+      headers: {
+        authorization: "Bearer 00000000-0000-4000-8000-000000000000",
+      },
+      socket: { remoteAddress: "127.0.0.1" },
+    };
+    const chunkWith = (extra: Record<string, unknown> = {}) => [
+      {
+        api_key: "00000000-0000-4000-8000-000000000000",
+        api_key_id: 1,
+        team_id: "team-1",
+        org_id: "org-1",
+        flags: {},
+        ...extra,
+      },
+    ];
+
+    beforeEach(() => {
+      config.USE_DB_AUTHENTICATION = true;
+      vi.mocked(getValue).mockResolvedValue(null);
+      vi.mocked(authCreditUsageChunk).mockResolvedValue(chunkWith());
+      vi.mocked(redlock.using).mockImplementation(
+        async (_keys, _ttl, _options, fn) => fn({ aborted: false } as never),
+      );
+      mockMultiplier(1);
+    });
+
+    it("gives a treatment org the raised limit", async () => {
+      vi.mocked(getRateLimitExperimentVariant).mockResolvedValue("treatment");
+
+      const auth = await authenticateUser(request, {}, RateLimiterMode.Scrape);
+
+      expect(auth.success).toBe(true);
+      expect(getRateLimitExperimentVariant).toHaveBeenCalledExactlyOnceWith({
+        orgId: "org-1",
+        teamId: "team-1",
+        apiKeyId: 1,
+        rateLimitMultiplier: 1,
+        isPaidPlan: false,
+      });
+      expect(getAutumnRateLimiter).toHaveBeenLastCalledWith(
+        RateLimiterMode.Scrape,
+        1,
+        {},
+        "treatment",
+      );
+    });
+
+    it("keeps the current limit for a control or unenrolled org", async () => {
+      for (const variant of ["control", undefined] as const) {
+        vi.mocked(getAutumnRateLimiter).mockClear();
+        vi.mocked(getRateLimitExperimentVariant).mockResolvedValue(variant);
+
+        await authenticateUser(request, {}, RateLimiterMode.Scrape);
+
+        expect(getAutumnRateLimiter).toHaveBeenCalledExactlyOnceWith(
+          RateLimiterMode.Scrape,
+          1,
+          {},
+        );
+      }
+    });
+
+    it("does not ask for a variant where it cannot change the limit", async () => {
+      await authenticateUser(request, {}, RateLimiterMode.Map);
+
+      expect(getRateLimitExperimentVariant).not.toHaveBeenCalled();
+    });
+
+    it("does not enroll a request denied by the auth checks", async () => {
+      vi.mocked(authCreditUsageChunk).mockResolvedValue(
+        chunkWith({ is_banned: true }),
+      );
+
+      const auth = await authenticateUser(request, {}, RateLimiterMode.Scrape);
+
+      expect(auth.success).toBe(false);
+      expect(getRateLimitExperimentVariant).not.toHaveBeenCalled();
+    });
   });
 
   describe("agent interop rate-limit floor", () => {
@@ -847,7 +1161,7 @@ describe("authenticateUser", () => {
     });
 
     it("floors a free team's multiplier at hobby for a trusted agent request", async () => {
-      vi.mocked(autumnService.getRateLimitMultiplier).mockResolvedValue(1);
+      mockMultiplier(1);
 
       const auth = await authenticateUser(
         agentRequest("agent-secret"),
@@ -861,10 +1175,14 @@ describe("authenticateUser", () => {
         HOBBY_RATE_LIMIT_MULTIPLIER,
         flags,
       );
+      // The experiment records the team's plan, not the floor.
+      expect(getRateLimitExperimentVariant).toHaveBeenCalledWith(
+        expect.objectContaining({ rateLimitMultiplier: 1, isPaidPlan: false }),
+      );
     });
 
     it("leaves a paid plan's multiplier alone for a trusted agent request", async () => {
-      vi.mocked(autumnService.getRateLimitMultiplier).mockResolvedValue(50);
+      mockMultiplier(50);
 
       await authenticateUser(
         agentRequest("agent-secret"),
@@ -880,7 +1198,7 @@ describe("authenticateUser", () => {
     });
 
     it("does not floor the multiplier when the agent interop secret is wrong", async () => {
-      vi.mocked(autumnService.getRateLimitMultiplier).mockResolvedValue(1);
+      mockMultiplier(1);
 
       await authenticateUser(
         agentRequest("not-the-secret"),
@@ -897,7 +1215,7 @@ describe("authenticateUser", () => {
 
     it("does not floor the multiplier when no agent interop secret is configured", async () => {
       config.AGENT_INTEROP_SECRET = undefined;
-      vi.mocked(autumnService.getRateLimitMultiplier).mockResolvedValue(1);
+      mockMultiplier(1);
 
       await authenticateUser(
         agentRequest("agent-secret"),
@@ -923,7 +1241,7 @@ describe("authenticateUser", () => {
           flags: overrideFlags,
         },
       ]);
-      vi.mocked(autumnService.getRateLimitMultiplier).mockResolvedValue(1);
+      mockMultiplier(1);
 
       await authenticateUser(
         agentRequest("agent-secret"),
@@ -932,8 +1250,7 @@ describe("authenticateUser", () => {
       );
 
       // The override replaces the whole base × multiplier computation, so the
-      // floor never applies and the Autumn multiplier is never fetched.
-      expect(autumnService.getRateLimitMultiplier).not.toHaveBeenCalled();
+      // floor never applies.
       expect(getAutumnRateLimiter).toHaveBeenCalledWith(
         RateLimiterMode.Scrape,
         1,
@@ -981,7 +1298,7 @@ describe("authenticateUser", () => {
       vi.mocked(redlock.using).mockImplementation(
         async (_keys, _ttl, _options, fn) => fn({ aborted: false } as never),
       );
-      // Mirrors auth_chunk_1: a row only when the key's purpose matches.
+      // Mirrors auth_chunk_2: a row only when the key's purpose matches.
       vi.mocked(authCreditUsageChunk).mockImplementation(
         async (_db, key, purpose = "general") =>
           key === managedKey && purpose === "hosted_mcp_oauth"
@@ -1061,7 +1378,7 @@ describe("authenticateUser", () => {
         allow,
       );
 
-      expect(autumnService.getRateLimitMultiplier).toHaveBeenCalledWith(
+      expect(autumnService.getTeamLimits).toHaveBeenCalledWith(
         "team-mcp",
         "org-mcp",
       );
@@ -1212,7 +1529,7 @@ describe("authenticateUser", () => {
       );
       if (!auth.success) throw new Error("expected fallback auth to succeed");
       expect(auth.chunk?.team_id).toBe("team-mcp");
-      expect(autumnService.getRateLimitMultiplier).toHaveBeenCalledWith(
+      expect(autumnService.getTeamLimits).toHaveBeenCalledWith(
         "team-mcp",
         "org-mcp",
       );
@@ -1342,6 +1659,383 @@ describe("authenticateUser", () => {
     await vi.waitFor(() =>
       expect(deleteKey).toHaveBeenCalledWith("acuc_team_team-1_scrape"),
     );
+  });
+
+  describe("Autumn limits on the ACUC", () => {
+    const apiKey = "00000000-0000-4000-8000-000000000000";
+    const keyRow = {
+      api_key: apiKey,
+      api_key_id: 1,
+      team_id: "team-1",
+      org_id: "org-1",
+      flags: null,
+    };
+    const known = {
+      concurrency_limit: 7,
+      rate_limit_multiplier: 25,
+      is_paid_plan: false,
+    };
+    const failOpen = {
+      concurrency_limit: 200,
+      rate_limit_multiplier: 2500,
+      is_paid_plan: true,
+    };
+    const authRequest = {
+      headers: { authorization: `Bearer ${apiKey}` },
+      socket: { remoteAddress: "127.0.0.1" },
+    };
+
+    beforeEach(() => {
+      config.USE_DB_AUTHENTICATION = true;
+      vi.mocked(getValue).mockResolvedValue(null);
+      vi.mocked(redlock.using).mockImplementation(
+        async (_keys, _ttl, _options, fn) => fn({ aborted: false } as never),
+      );
+      vi.mocked(authCreditUsageChunk).mockImplementation(
+        async () => [{ ...keyRow }] as never,
+      );
+      vi.mocked(authCreditUsageChunkFromTeam).mockImplementation(
+        async () => [{ ...keyRow }] as never,
+      );
+    });
+
+    it("builds the key ACUC with the team's limits and caches it for the full TTL", async () => {
+      vi.mocked(autumnService.getTeamLimits).mockResolvedValue(known);
+
+      const auth = await authenticateUser(
+        authRequest,
+        {},
+        RateLimiterMode.Scrape,
+      );
+
+      expect(auth.success).toBe(true);
+      expect(autumnService.getTeamLimits).toHaveBeenCalledTimes(1);
+      expect(autumnService.getTeamLimits).toHaveBeenCalledWith(
+        "team-1",
+        "org-1",
+      );
+      expect(getAutumnRateLimiter).toHaveBeenCalledWith(
+        RateLimiterMode.Scrape,
+        25,
+        null,
+      );
+      await vi.waitFor(() => expect(setValue).toHaveBeenCalled());
+      const [key, value, ttl] = vi.mocked(setValue).mock.calls[0];
+      expect(key).toBe(`acuc_general_${apiKey}_scrape`);
+      expect(JSON.parse(value)).toMatchObject(known);
+      expect(ttl).toBe(600);
+    });
+
+    it("puts the fail-open limits on the chunk and caches it only briefly when Autumn fails", async () => {
+      vi.mocked(autumnService.getTeamLimits).mockRejectedValue(
+        new Error("Autumn down"),
+      );
+
+      await authenticateUser(authRequest, {}, RateLimiterMode.Scrape);
+
+      expect(getAutumnRateLimiter).toHaveBeenCalledWith(
+        RateLimiterMode.Scrape,
+        2500,
+        null,
+      );
+      await vi.waitFor(() => expect(setValue).toHaveBeenCalled());
+      const [, value, ttl] = vi.mocked(setValue).mock.calls[0];
+      expect(JSON.parse(value)).toMatchObject(failOpen);
+      expect(ttl).toBe(60);
+    });
+
+    it("reads the limits off a cached ACUC without asking Autumn", async () => {
+      vi.mocked(getValue).mockResolvedValue(
+        JSON.stringify({ ...keyRow, ...known }),
+      );
+
+      await authenticateUser(authRequest, {}, RateLimiterMode.Scrape);
+
+      expect(autumnService.getTeamLimits).not.toHaveBeenCalled();
+      expect(getAutumnRateLimiter).toHaveBeenCalledWith(
+        RateLimiterMode.Scrape,
+        25,
+        null,
+      );
+    });
+
+    it("fills a cached ACUC that predates the limits with one live read, writing nothing back", async () => {
+      vi.mocked(getValue).mockResolvedValue(JSON.stringify(keyRow));
+      vi.mocked(autumnService.getTeamLimits).mockResolvedValue(known);
+
+      await expect(getACUCTeam("team-1")).resolves.toMatchObject(known);
+
+      expect(autumnService.getTeamLimits).toHaveBeenCalledTimes(1);
+      expect(setValue).not.toHaveBeenCalled();
+    });
+
+    it("fills a cached ACUC that predates is_paid_plan with one live read", async () => {
+      vi.mocked(getValue).mockResolvedValue(
+        JSON.stringify({
+          ...keyRow,
+          concurrency_limit: 7,
+          rate_limit_multiplier: 25,
+        }),
+      );
+      vi.mocked(autumnService.getTeamLimits).mockResolvedValue({
+        ...known,
+        is_paid_plan: true,
+      });
+
+      await expect(getACUCTeam("team-1")).resolves.toMatchObject({
+        is_paid_plan: true,
+      });
+      expect(autumnService.getTeamLimits).toHaveBeenCalledTimes(1);
+    });
+
+    it("builds the team ACUC with the fail-open limits cached only briefly", async () => {
+      vi.mocked(autumnService.getTeamLimits).mockRejectedValue(
+        new Error("Autumn down"),
+      );
+
+      await expect(getACUCTeam("team-1")).resolves.toMatchObject(failOpen);
+
+      await vi.waitFor(() => expect(setValue).toHaveBeenCalled());
+      const [key, value, ttl] = vi.mocked(setValue).mock.calls[0];
+      expect(key).toBe("acuc_team_team-1_scrape");
+      expect(JSON.parse(value)).toMatchObject(failOpen);
+      expect(ttl).toBe(60);
+    });
+
+    it("builds a new chunk instead of mutating the row it read", async () => {
+      const row = { ...keyRow };
+      vi.mocked(authCreditUsageChunkFromTeam).mockResolvedValue([row] as never);
+      vi.mocked(autumnService.getTeamLimits).mockResolvedValue(known);
+
+      await expect(getACUCTeam("team-1")).resolves.toMatchObject(known);
+      expect(row).toEqual(keyRow);
+    });
+
+    it("gives an uncached key chunk the team ACUC's limits without asking Autumn", async () => {
+      config.MCP_DELEGATED_CREDENTIAL_SECRET = "mcp-delegation-secret";
+      vi.mocked(getValue).mockImplementation(async key =>
+        key === "acuc_team_team-1_scrape"
+          ? JSON.stringify({ ...keyRow, ...known })
+          : null,
+      );
+
+      await authenticateUser(
+        {
+          headers: { authorization: `Bearer ${signDelegation()}` },
+          socket: { remoteAddress: "127.0.0.1" },
+        },
+        {},
+        RateLimiterMode.Scrape,
+      );
+
+      expect(autumnService.getTeamLimits).not.toHaveBeenCalled();
+      expect(getAutumnRateLimiter).toHaveBeenCalledWith(
+        RateLimiterMode.Scrape,
+        25,
+        null,
+      );
+    });
+  });
+
+  describe("auth/denied log", () => {
+    const unknownKey = "fc-3c9a0d5e7b1f4a2c8d6e9f0a1b2c3d4e";
+    const clientIp = "198.51.100.23";
+
+    const deniedLines = () =>
+      (vi.mocked(logger.warn).mock.calls as unknown as [string, any][])
+        .filter(([, meta]) => meta?.canonicalLog === "auth/denied")
+        .map(([message, meta]) => ({ message, meta }));
+
+    beforeEach(() => {
+      config.USE_DB_AUTHENTICATION = true;
+      vi.mocked(getValue).mockResolvedValue(null);
+      vi.mocked(authCreditUsageChunk).mockResolvedValue([]);
+      vi.mocked(redlock.using).mockImplementation(
+        async (_keys, _ttl, _options, fn) => fn({ aborted: false } as never),
+      );
+      vi.spyOn(logger, "warn").mockImplementation(() => logger);
+    });
+
+    it.each([
+      ["missing_credentials", {}, "Unauthorized"],
+      [
+        "malformed_authorization",
+        { authorization: "Bearer" },
+        "Unauthorized: Token missing",
+      ],
+      [
+        "malformed_key",
+        { authorization: "Bearer not-a-real-key" },
+        "Unauthorized: Invalid token",
+      ],
+      [
+        "unknown_key",
+        { authorization: `Bearer ${unknownKey}` },
+        "Unauthorized: Invalid token",
+      ],
+    ] as const)(
+      "logs one %s line and returns the same 401",
+      async (reason, headers, error) => {
+        const auth = await authenticateUser(
+          {
+            method: "POST",
+            baseUrl: "/v2",
+            path: "/scrape",
+            route: { path: "/scrape" },
+            headers,
+            socket: { remoteAddress: clientIp },
+          },
+          {},
+          RateLimiterMode.Scrape,
+        );
+
+        expect(auth).toEqual({ success: false, error, status: 401 });
+        expect(deniedLines()).toEqual([
+          {
+            message: "Request denied",
+            meta: {
+              canonicalLog: "auth/denied",
+              reason,
+              status: 401,
+              method: "POST",
+              route: "/v2/scrape",
+            },
+          },
+        ]);
+      },
+    );
+
+    it("redacts the admin secret from an admin route", async () => {
+      const originalBullAuthKey = config.BULL_AUTH_KEY;
+      config.BULL_AUTH_KEY = "bull-admin-secret";
+      try {
+        await authenticateUser(
+          {
+            method: "POST",
+            baseUrl: "",
+            path: "/admin/bull-admin-secret/crawl-monitor",
+            route: { path: "/admin/bull-admin-secret/crawl-monitor" },
+            headers: { authorization: `Bearer ${unknownKey}` },
+            socket: { remoteAddress: clientIp },
+          },
+          {},
+          RateLimiterMode.Crawl,
+        );
+      } finally {
+        config.BULL_AUTH_KEY = originalBullAuthKey;
+      }
+
+      expect(deniedLines()).toEqual([
+        expect.objectContaining({
+          meta: expect.objectContaining({
+            reason: "unknown_key",
+            route: "/admin/:bullAuthKey/crawl-monitor",
+          }),
+        }),
+      ]);
+      expect(JSON.stringify(deniedLines())).not.toContain("bull-admin-secret");
+    });
+
+    it("names the team and key id of a banned team's key", async () => {
+      vi.mocked(authCreditUsageChunk).mockResolvedValue([
+        {
+          api_key: "00000000-0000-4000-8000-000000000000",
+          api_key_id: 9,
+          team_id: "team-banned",
+          org_id: "org-1",
+          is_banned: true,
+          flags: null,
+        },
+      ]);
+
+      const auth = await authenticateUser(
+        {
+          headers: {
+            authorization: "Bearer 00000000-0000-4000-8000-000000000000",
+          },
+          socket: { remoteAddress: clientIp },
+        },
+        {},
+        RateLimiterMode.Scrape,
+      );
+
+      expect(auth).toEqual(expect.objectContaining({ status: 403 }));
+      expect(deniedLines()).toEqual([
+        {
+          message: "Request denied",
+          meta: {
+            canonicalLog: "auth/denied",
+            reason: "team_banned",
+            status: 403,
+            teamId: "team-banned",
+            apiKeyId: 9,
+          },
+        },
+      ]);
+    });
+
+    it("never logs the credential, the Authorization header, or the client IP", async () => {
+      await authenticateUser(
+        {
+          headers: {
+            authorization: `Bearer ${unknownKey}`,
+            "x-forwarded-for": clientIp,
+          },
+          socket: { remoteAddress: clientIp },
+          ip: clientIp,
+        },
+        {},
+        RateLimiterMode.Scrape,
+      );
+
+      const logged = JSON.stringify(deniedLines());
+      expect(deniedLines()).toHaveLength(1);
+      expect(logged).not.toContain(unknownKey.slice(3, 11));
+      expect(logged).not.toContain(unknownKey.slice(-8));
+      expect(logged).not.toContain("Bearer");
+      expect(logged).not.toContain(clientIp);
+    });
+
+    it("logs a suspicious keyless IP as denied but not a keyless quota 429", async () => {
+      vi.mocked(isKeylessConfigured).mockReturnValue(true);
+      vi.mocked(isKeylessIpSuspicious).mockResolvedValueOnce(true);
+      const keylessRequest = () => ({
+        headers: {},
+        socket: { remoteAddress: "203.0.113.8" },
+      });
+
+      const suspicious = await authenticateUser(
+        keylessRequest(),
+        {},
+        RateLimiterMode.Scrape,
+        { allowKeyless: true },
+      );
+      vi.mocked(consumeKeylessRequest).mockResolvedValue({
+        ok: false,
+        reason: "requests",
+        requestsUsed: 10,
+        creditsUsed: 2,
+      });
+      const limited = await authenticateUser(
+        keylessRequest(),
+        {},
+        RateLimiterMode.Scrape,
+        { allowKeyless: true },
+      );
+
+      expect(suspicious).toEqual(expect.objectContaining({ status: 403 }));
+      expect(limited).toEqual(expect.objectContaining({ status: 429 }));
+      expect(deniedLines()).toEqual([
+        {
+          message: "Request denied",
+          meta: {
+            canonicalLog: "auth/denied",
+            reason: "keyless_ip_suspicious",
+            status: 403,
+          },
+        },
+      ]);
+    });
   });
 
   it("clears purpose-qualified and legacy ACUC cache entries", async () => {

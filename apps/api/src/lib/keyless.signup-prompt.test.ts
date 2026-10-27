@@ -9,7 +9,7 @@ vi.mock("ioredis", () => ({
   },
 }));
 vi.mock("../services/rate-limiter", () => ({
-  redisRateLimitClient: { ttl: vi.fn().mockResolvedValue(-1), on: vi.fn() },
+  redisRateLimitClient: { pttl: vi.fn().mockResolvedValue(-1), on: vi.fn() },
 }));
 vi.mock("./keyless-prompt-analytics", () => ({
   trackKeylessPromptShown: vi.fn(),
@@ -23,6 +23,7 @@ import { config } from "../config";
 import { keylessEligibilityController } from "../controllers/v2/keyless-eligibility";
 import { browserError } from "../controllers/v2/browser";
 import { HangarError } from "./hangar";
+import { BrowserSessionError } from "./browser-lifecycle";
 import {
   KEYLESS_FREE_TIER_LIMIT_MESSAGE,
   checkKeylessEligibility,
@@ -35,6 +36,7 @@ import {
 import { trackKeylessPromptShown } from "./keyless-prompt-analytics";
 import { decryptKeylessSignupToken } from "./keyless-signup-link";
 import { logger } from "./logger";
+import { mintWorldIdCredential } from "./world-id";
 
 const TEST_KEY = "AAECAwQFBgcICQoLDA0ODw==";
 const IP = "203.0.113.8";
@@ -178,11 +180,15 @@ describe("reportKeylessPromptShown", () => {
 describe("browserError", () => {
   it("replaces the keyless browser limit text with the caller's own link", () => {
     const res = fakeRes();
-    browserError(res, new HangarError(429, KEYLESS_FREE_TIER_LIMIT_MESSAGE), {
-      auth: { team_id: "preview_keyless_203.0.113.8" },
-      body: { origin: "cli" },
-      headers: {},
-    } as any);
+    browserError(
+      res,
+      new BrowserSessionError(429, KEYLESS_FREE_TIER_LIMIT_MESSAGE),
+      {
+        auth: { team_id: "preview_keyless_203.0.113.8" },
+        body: { origin: "cli" },
+        headers: {},
+      } as any,
+    );
 
     expect(res.status).toHaveBeenCalledWith(429);
     const body = res.json.mock.calls[0][0];
@@ -329,6 +335,42 @@ describe("keyless eligibility signup link", () => {
     });
     // An IPv6 caller is not a keyless identity, so nothing is reported.
     expect(trackKeylessPromptShown).not.toHaveBeenCalled();
+  });
+
+  it("checks a forwarded World ID credential only while World ID is configured", async () => {
+    const original = {
+      WORLD_ID_CLIENT_ID: config.WORLD_ID_CLIENT_ID,
+      WORLD_ID_CLIENT_SECRET: config.WORLD_ID_CLIENT_SECRET,
+      WORLD_ID_CREDENTIAL_SECRET: config.WORLD_ID_CREDENTIAL_SECRET,
+      WORLD_ID_SUBJECT_SECRET: config.WORLD_ID_SUBJECT_SECRET,
+    };
+    try {
+      config.WORLD_ID_CLIENT_ID = "app_test";
+      config.WORLD_ID_CLIENT_SECRET = "client-secret";
+      config.WORLD_ID_CREDENTIAL_SECRET = "c".repeat(32);
+      config.WORLD_ID_SUBJECT_SECRET = "s".repeat(32);
+      const hash = "h".repeat(43);
+      const { credential } = mintWorldIdCredential(hash);
+      vi.mocked(checkKeylessEligibility).mockResolvedValue({ eligible: true });
+      const request = () => {
+        const req = eligibilityRequest();
+        req.headers["x-firecrawl-world-id"] = credential;
+        return req;
+      };
+
+      await keylessEligibilityController(request(), fakeRes());
+      await keylessEligibilityController(eligibilityRequest(), fakeRes());
+      config.WORLD_ID_CLIENT_SECRET = undefined;
+      await keylessEligibilityController(request(), fakeRes());
+
+      expect(vi.mocked(checkKeylessEligibility).mock.calls).toEqual([
+        [IP, `wid_${hash}`],
+        [IP, undefined],
+        [IP, undefined],
+      ]);
+    } finally {
+      Object.assign(config, original);
+    }
   });
 
   it("omits the link for an eligible IP unless asked", async () => {

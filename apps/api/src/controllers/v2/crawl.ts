@@ -40,12 +40,12 @@ import { checkUrl } from "../../lib/threat-protection";
 import { UnsafeDomainBlockedError } from "../../lib/threat-protection/error";
 import { calculateThreatScanCredits } from "../../lib/scrape-billing";
 import { billTeam } from "../../services/billing/credit_billing";
-import { getEffectiveConcurrencyLimit } from "../../lib/concurrency-limit";
 import { emitRejectedScrapeActivityEvent } from "../../lib/siem-logging";
 import {
   initializeRequestCredits,
   requestCreditsShards,
 } from "../../lib/request-credits-store";
+import { DEFAULT_TEAM_LIMITS } from "../../services/autumn/autumn.service";
 
 export async function crawlController(
   req: RequestWithAuth<{}, CrawlResponse, CrawlRequest>,
@@ -327,10 +327,8 @@ export async function crawlController(
     });
   });
 
-  const effectiveConcurrency = await getEffectiveConcurrencyLimit(
-    req.auth.team_id,
-    req.acuc?.org_id ?? null,
-  );
+  const effectiveConcurrency =
+    req.acuc?.concurrency_limit ?? DEFAULT_TEAM_LIMITS.concurrency_limit;
   const sc: StoredCrawl = {
     originUrl: req.body.url,
     crawlerOptions: toV0CrawlerOptions(finalCrawlerOptions),
@@ -345,7 +343,7 @@ export async function crawlController(
       threatProtection: threatProtection.policy ?? undefined,
       // Safe Mode rides the crawl payload so every child scrape resolves it
       // per-URL at the scrapeURL backstop (allowlist applies per child).
-      teamFlags: req.acuc?.flags ?? undefined,
+      teamFlags: req.acuc?.flags ?? null,
       safeModeBypassed: safeMode.bypassed === true,
     },
     team_id: req.auth.team_id,
@@ -357,6 +355,7 @@ export async function crawlController(
     zeroDataRetention,
     v1: true,
     webhook: req.body.webhook,
+    origin: req.body.origin,
   };
 
   const crawler = crawlToCrawler(id, sc, req.acuc?.flags ?? null);

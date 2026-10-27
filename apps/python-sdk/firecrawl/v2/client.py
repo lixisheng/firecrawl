@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable, Union, Literal, BinaryIO
 from .types import (
     ClientConfig,
+    ParseFormat,
     ParseOptions,
     ScrapeOptions,
     Document,
@@ -16,6 +17,8 @@ from .types import (
     SearchData,
     DeveloperSearchResponse,
     DeveloperSearchType,
+    GovSearchCourtType,
+    GovSearchResponse,
     SourceOption,
     CategoryOption,
     FindToolsData,
@@ -62,12 +65,14 @@ from .types import (
 )
 from .utils.http_client import HttpClient
 from .utils.error_handler import FirecrawlError
+from .utils.v1_compat import call_v1
 from .methods import scrape as scrape_module
 from .methods import parse as parse_module
 from .methods import crawl as crawl_module  
 from .methods import batch as batch_module
 from .methods import search as search_module
 from .methods import developer as developer_module
+from .methods import gov as gov_module
 from .methods import map as map_module
 from .methods import batch as batch_methods
 from .methods import usage as usage_methods
@@ -94,7 +99,8 @@ _SCRAPE_OPTION_KEYS = frozenset({
     "only_main_content", "timeout", "wait_for", "mobile",
     "parsers", "actions", "location", "skip_tls_verification",
     "remove_base64_images", "fast_mode", "use_mock", "block_ads",
-    "proxy", "max_age", "store_in_cache", "lockdown", "threat_protection",
+    "proxy", "max_age", "store_in_cache", "lockdown", "check_prompt_injection",
+    "threat_protection",
     "profile", "audit_metadata",
 })
 
@@ -129,7 +135,10 @@ class FirecrawlClient:
             max_retries: Maximum number of retries for failed requests
             backoff_factor: Exponential backoff factor for retries (e.g. 0.5 means wait 0.5s, then 1s, then 2s between retries)
             origin: Attribution string stamped into API request payloads
-                (defaults to ``python-sdk@<version>``)
+                (defaults to ``python-sdk@<version>``, or
+                ``python-sdk.<package>@<version>`` when an installed package
+                creates the client; set FIRECRAWL_DISABLE_CALLER_ORIGIN=1 to
+                keep the plain default)
         """
         if api_key is None:
             api_key = os.getenv("FIRECRAWL_API_KEY")
@@ -183,6 +192,7 @@ class FirecrawlClient:
         max_age: Optional[int] = None,
         store_in_cache: Optional[bool] = None,
         lockdown: Optional[bool] = None,
+        check_prompt_injection: Optional[bool] = None,
         threat_protection: Optional[ThreatProtectionOptions] = None,
         profile: Optional[Dict[str, Any]] = None,
         audit_metadata: Optional[AuditMetadata] = None,
@@ -214,6 +224,7 @@ class FirecrawlClient:
             max_age: Maximum age of the cache
             store_in_cache: Whether to store the result in the cache
             lockdown: Serve only previously cached results; never make outbound requests. Returns 404 SCRAPE_LOCKDOWN_CACHE_MISS on cache miss.
+            check_prompt_injection: Scan the page content for prompt injection with any format except rawBase64, before LLM-backed formats run. A detection fails the scrape. Adds 4 credits when the check scans the whole page.
             threat_protection: Enterprise per-request override of the team's threat protection policy
             profile: Browser profile for persistent state (e.g. {"name": "my-profile", "saveChanges": True})
             tool_detail: "compact" returns provider, capability and description; "summary" (default) adds metadata; "full" includes contracts when domain discovery is enabled.
@@ -243,6 +254,7 @@ class FirecrawlClient:
                 max_age=max_age,
                 store_in_cache=store_in_cache,
                 lockdown=lockdown,
+                check_prompt_injection=check_prompt_injection,
                 threat_protection=threat_protection,
                 profile=profile,
                 audit_metadata=audit_metadata,
@@ -250,7 +262,7 @@ class FirecrawlClient:
                 domain_tools=domain_tools,
                 tool_detail=tool_detail,
             ).items() if v is not None}
-        ) if any(v is not None for v in [formats, headers, include_tags, exclude_tags, only_main_content, timeout, wait_for, mobile, parsers, actions, location, skip_tls_verification, remove_base64_images, fast_mode, use_mock, block_ads, proxy, max_age, store_in_cache, lockdown, threat_protection, profile, audit_metadata, integration, domain_tools, tool_detail]) else None
+        ) if any(v is not None for v in [formats, headers, include_tags, exclude_tags, only_main_content, timeout, wait_for, mobile, parsers, actions, location, skip_tls_verification, remove_base64_images, fast_mode, use_mock, block_ads, proxy, max_age, store_in_cache, lockdown, check_prompt_injection, threat_protection, profile, audit_metadata, integration, domain_tools, tool_detail]) else None
         if alexandria is not None:
             if url is not None or auto_resume is not None or (options and set(options.model_dump(exclude_none=True, exclude_unset=True)) - {"timeout", "integration"}):
                 raise ValueError("alexandria cannot be combined with URL scrape options")
@@ -399,45 +411,45 @@ class FirecrawlClient:
         """Deprecated alias for stop_interaction()."""
         return self.stop_interaction(job_id)
 
-    def scrape_url(self, url: str, **kwargs):
-        """V1 compatibility alias for agent recovery. Prefer scrape()."""
-        return self.scrape(url, **kwargs)
+    def scrape_url(self, url: str, params: Optional[Dict[str, Any]] = None, **kwargs):
+        """Deprecated v1 alias for scrape(); also takes v1 params and returns v1-readable results."""
+        return call_v1(self.scrape, url, params=params, **kwargs)
 
-    def crawl_url(self, url: str, **kwargs):
-        """V1 compatibility alias for agent recovery. Prefer crawl()."""
-        return self.crawl(url, **kwargs)
+    def crawl_url(self, url: str, params: Optional[Dict[str, Any]] = None, idempotency_key: Optional[str] = None, **kwargs):
+        """Deprecated v1 alias for crawl(); also takes v1 params and returns v1-readable results. v2 crawls take no idempotency_key, so it is ignored."""
+        return call_v1(self.crawl, url, params=params, **kwargs)
 
-    def map_url(self, url: str, **kwargs):
-        """V1 compatibility alias for agent recovery. Prefer map()."""
-        return self.map(url, **kwargs)
+    def map_url(self, url: str, params: Optional[Dict[str, Any]] = None, **kwargs):
+        """Deprecated v1 alias for map(); also takes v1 params and returns v1-readable results."""
+        return call_v1(self.map, url, params=params, **kwargs)
 
-    def async_crawl_url(self, url: str, **kwargs):
-        """V1 compatibility alias for agent recovery. Prefer start_crawl()."""
-        return self.start_crawl(url, **kwargs)
+    def async_crawl_url(self, url: str, params: Optional[Dict[str, Any]] = None, idempotency_key: Optional[str] = None, **kwargs):
+        """Deprecated v1 alias for start_crawl(); also takes v1 params and returns v1-readable results. v2 crawls take no idempotency_key, so it is ignored."""
+        return call_v1(self.start_crawl, url, params=params, **kwargs)
 
     def check_crawl_status(self, id: str, **kwargs):
-        """V1 compatibility alias for agent recovery. Prefer get_crawl_status()."""
-        return self.get_crawl_status(id, **kwargs)
+        """Deprecated v1 alias for get_crawl_status(); returns v1-readable results."""
+        return call_v1(self.get_crawl_status, id, **kwargs)
 
     def check_crawl_errors(self, id: str):
-        """V1 compatibility alias for agent recovery. Prefer get_crawl_errors()."""
-        return self.get_crawl_errors(id)
+        """Deprecated v1 alias for get_crawl_errors(); returns v1-readable results."""
+        return call_v1(self.get_crawl_errors, id)
 
-    def batch_scrape_urls(self, urls, **kwargs):
-        """V1 compatibility alias for agent recovery. Prefer batch_scrape()."""
-        return self.batch_scrape(urls, **kwargs)
+    def batch_scrape_urls(self, urls, params: Optional[Dict[str, Any]] = None, **kwargs):
+        """Deprecated v1 alias for batch_scrape(); also takes v1 params and returns v1-readable results."""
+        return call_v1(self.batch_scrape, urls, params=params, **kwargs)
 
-    def async_batch_scrape_urls(self, urls, **kwargs):
-        """V1 compatibility alias for agent recovery. Prefer start_batch_scrape()."""
-        return self.start_batch_scrape(urls, **kwargs)
+    def async_batch_scrape_urls(self, urls, params: Optional[Dict[str, Any]] = None, **kwargs):
+        """Deprecated v1 alias for start_batch_scrape(); also takes v1 params and returns v1-readable results."""
+        return call_v1(self.start_batch_scrape, urls, params=params, **kwargs)
 
     def check_batch_scrape_status(self, id: str, **kwargs):
-        """V1 compatibility alias for agent recovery. Prefer get_batch_scrape_status()."""
-        return self.get_batch_scrape_status(id, **kwargs)
+        """Deprecated v1 alias for get_batch_scrape_status(); returns v1-readable results."""
+        return call_v1(self.get_batch_scrape_status, id, **kwargs)
 
     def check_batch_scrape_errors(self, id: str):
-        """V1 compatibility alias for agent recovery. Prefer get_batch_scrape_errors()."""
-        return self.get_batch_scrape_errors(id)
+        """Deprecated v1 alias for get_batch_scrape_errors(); returns v1-readable results."""
+        return call_v1(self.get_batch_scrape_errors, id)
 
     def parse(
         self,
@@ -467,6 +479,16 @@ class FirecrawlClient:
             filename=filename,
             content_type=content_type,
         )
+
+    def get_parse_formats(self) -> List[ParseFormat]:
+        """
+        List the file formats the parse endpoint accepts.
+
+        Returns:
+            List of ParseFormat entries. ``available`` is False for formats
+            that are known but disabled on this deployment.
+        """
+        return parse_module.get_parse_formats(self.http_client)
 
 
     def search(
@@ -573,6 +595,53 @@ class FirecrawlClient:
             fork=fork,
             skills=skills,
         )
+
+    def gov_search(
+        self,
+        query: str,
+        k: Optional[int] = None,
+        *,
+        jurisdiction: Optional[str] = None,
+        court: Optional[str] = None,
+        court_type: Optional[GovSearchCourtType] = None,
+        cites: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> GovSearchResponse:
+        """
+        Search the Government Index of US primary law and regulatory material.
+
+        Filters keep only pages the index has labeled, so a filtered search can
+        leave out relevant pages, and no results does not mean none exist. Court
+        labels are most complete for federal courts and case-law collections.
+
+        Args:
+            query: Search query string
+            k: Number of results to return, 1-100 (default: 10)
+            jurisdiction: Keep only pages of one jurisdiction: "us" for federal,
+                or "us-" plus a two-letter state or territory code, such as
+                "us-ca" or "us-dc"
+            court: Keep only pages labeled for one court, by CourtListener court
+                id, such as "scotus", "ca9" or "nysd"
+            court_type: Keep only pages from one type of court, such as
+                "federal-appellate" or "state-supreme"
+            cites: Keep only pages that cite one law or case, as a printed
+                citation such as "42 U.S.C. § 1983" or "5 U.S. 137", or a
+                citation id such as "us:usc:42:1983"
+            domain: Keep only pages from one site, such as "irs.gov"
+
+        Returns:
+            GovSearchResponse with ranked results in data.web
+        """
+        return gov_module.gov_search(
+            self.http_client,
+            query,
+            k=k,
+            jurisdiction=jurisdiction,
+            court=court,
+            court_type=court_type,
+            cites=cites,
+            domain=domain,
+        )
     
     def crawl(
         self,
@@ -613,6 +682,7 @@ class FirecrawlClient:
         max_age: Optional[int] = None,
         store_in_cache: Optional[bool] = None,
         lockdown: Optional[bool] = None,
+        check_prompt_injection: Optional[bool] = None,
         threat_protection: Optional[ThreatProtectionOptions] = None,
         profile: Optional[Dict[str, Any]] = None,
         audit_metadata: Optional[AuditMetadata] = None,
@@ -664,6 +734,7 @@ class FirecrawlClient:
             max_age: Cache max age (convenience kwarg)
             store_in_cache: Cache results (convenience kwarg)
             lockdown: Serve only cached results (convenience kwarg)
+            check_prompt_injection: Scan the page content for prompt injection with any format except rawBase64, before LLM-backed formats run. A detection fails the scrape. Adds 4 credits when the check scans the whole page.
             threat_protection: Enterprise threat protection override (convenience kwarg)
             profile: Browser profile (convenience kwarg)
             audit_metadata: Metadata to include in SIEM logging events
@@ -691,6 +762,7 @@ class FirecrawlClient:
                 remove_base64_images=remove_base64_images, fast_mode=fast_mode,
                 use_mock=use_mock, block_ads=block_ads, proxy=proxy,
                 max_age=max_age, store_in_cache=store_in_cache, lockdown=lockdown,
+                check_prompt_injection=check_prompt_injection,
                 threat_protection=threat_protection, profile=profile,
                 audit_metadata=audit_metadata,
             ).items() if v is not None}
@@ -775,6 +847,7 @@ class FirecrawlClient:
         max_age: Optional[int] = None,
         store_in_cache: Optional[bool] = None,
         lockdown: Optional[bool] = None,
+        check_prompt_injection: Optional[bool] = None,
         threat_protection: Optional[ThreatProtectionOptions] = None,
         profile: Optional[Dict[str, Any]] = None,
         audit_metadata: Optional[AuditMetadata] = None,
@@ -824,6 +897,7 @@ class FirecrawlClient:
             max_age: Cache max age (convenience kwarg)
             store_in_cache: Cache results (convenience kwarg)
             lockdown: Serve only cached results (convenience kwarg)
+            check_prompt_injection: Scan the page content for prompt injection with any format except rawBase64, before LLM-backed formats run. A detection fails the scrape. Adds 4 credits when the check scans the whole page.
             threat_protection: Enterprise threat protection override (convenience kwarg)
             profile: Browser profile (convenience kwarg)
             audit_metadata: Metadata to include in SIEM logging events
@@ -848,6 +922,7 @@ class FirecrawlClient:
                 remove_base64_images=remove_base64_images, fast_mode=fast_mode,
                 use_mock=use_mock, block_ads=block_ads, proxy=proxy,
                 max_age=max_age, store_in_cache=store_in_cache, lockdown=lockdown,
+                check_prompt_injection=check_prompt_injection,
                 threat_protection=threat_protection, profile=profile,
                 audit_metadata=audit_metadata,
             ).items() if v is not None}
@@ -1169,7 +1244,8 @@ class FirecrawlClient:
             crawl_id: The ID of the crawl job to cancel
             
         Returns:
-            bool: True if the crawl was cancelled, False otherwise
+            bool: True if the crawl was cancelled. False if the crawl was not
+            cancelled, for example because it already completed.
         """
         return crawl_module.cancel_crawl(self.http_client, crawl_id)
 
@@ -1328,6 +1404,7 @@ class FirecrawlClient:
         max_age: Optional[int] = None,
         store_in_cache: Optional[bool] = None,
         lockdown: Optional[bool] = None,
+        check_prompt_injection: Optional[bool] = None,
         threat_protection: Optional[ThreatProtectionOptions] = None,
         audit_metadata: Optional[AuditMetadata] = None,
         webhook: Optional[Union[str, WebhookConfig]] = None,
@@ -1362,6 +1439,7 @@ class FirecrawlClient:
             max_age: Cache max age
             store_in_cache: Whether to store results in cache
             lockdown: Serve only previously cached results; never make outbound requests.
+            check_prompt_injection: Scan the page content for prompt injection with any format except rawBase64, before LLM-backed formats run. A detection fails the scrape. Adds 4 credits when the check scans the whole page.
             threat_protection: Enterprise per-request override of the team's threat protection policy
             audit_metadata: Metadata to include in SIEM logging events
             webhook: Webhook configuration
@@ -1397,9 +1475,10 @@ class FirecrawlClient:
                 max_age=max_age,
                 store_in_cache=store_in_cache,
                 lockdown=lockdown,
+                check_prompt_injection=check_prompt_injection,
                 threat_protection=threat_protection,
             ).items() if v is not None}
-        ) if any(v is not None for v in [formats, headers, include_tags, exclude_tags, only_main_content, timeout, wait_for, mobile, parsers, actions, location, skip_tls_verification, remove_base64_images, fast_mode, use_mock, block_ads, proxy, max_age, store_in_cache, lockdown, threat_protection]) else None
+        ) if any(v is not None for v in [formats, headers, include_tags, exclude_tags, only_main_content, timeout, wait_for, mobile, parsers, actions, location, skip_tls_verification, remove_base64_images, fast_mode, use_mock, block_ads, proxy, max_age, store_in_cache, lockdown, check_prompt_injection, threat_protection]) else None
 
         return batch_module.start_batch_scrape(
             self.http_client,
@@ -1511,6 +1590,8 @@ class FirecrawlClient:
         thread_id: Optional[str] = None,
         mode: Optional[Literal["extract", "chat"]] = None,
         exchange: Optional[Union[AgentExchangeOptions, Dict[str, Any]]] = None,
+        location: Optional[Dict[str, str]] = None,
+        zero_data_retention: Optional[bool] = None,
     ):
         """Start an agent job (non-blocking).
 
@@ -1529,6 +1610,11 @@ class FirecrawlClient:
             thread_id: Continue an existing thread instead of starting one
             mode: "extract" (default) or "chat"
             exchange: Data provider options, forwarded as sent
+            location: Country for the whole run, as ``{"country": "DE"}``
+                (ISO 3166-1 alpha-2). Scrapes and browser sessions are proxied
+                from it, and search results are localized to it without changing
+                where requests come from. The agent cannot change it.
+            zero_data_retention: Run the agent with zero data retention (requires the team to have ZDR enabled)
         Returns:
             Response payload with job id/status (poll with get_agent_status)
         """
@@ -1548,6 +1634,8 @@ class FirecrawlClient:
             thread_id=thread_id,
             mode=mode,
             exchange=exchange,
+            location=location,
+            zero_data_retention=zero_data_retention,
         )
 
     def agent(
@@ -1569,6 +1657,8 @@ class FirecrawlClient:
         thread_id: Optional[str] = None,
         mode: Optional[Literal["extract", "chat"]] = None,
         exchange: Optional[Union[AgentExchangeOptions, Dict[str, Any]]] = None,
+        location: Optional[Dict[str, str]] = None,
+        zero_data_retention: Optional[bool] = None,
     ):
         """Run an agent and wait until completion.
 
@@ -1589,6 +1679,11 @@ class FirecrawlClient:
             thread_id: Continue an existing thread instead of starting one
             mode: "extract" (default) or "chat"
             exchange: Data provider options, forwarded as sent
+            location: Country for the whole run, as ``{"country": "DE"}``
+                (ISO 3166-1 alpha-2). Scrapes and browser sessions are proxied
+                from it, and search results are localized to it without changing
+                where requests come from. The agent cannot change it.
+            zero_data_retention: Run the agent with zero data retention (requires the team to have ZDR enabled)
         Returns:
             Final agent response when completed
         """
@@ -1610,6 +1705,8 @@ class FirecrawlClient:
             thread_id=thread_id,
             mode=mode,
             exchange=exchange,
+            location=location,
+            zero_data_retention=zero_data_retention,
         )
 
     def get_agent_status(self, job_id: str):
@@ -1718,7 +1815,9 @@ class FirecrawlClient:
         ttl: Optional[int] = None,
         activity_ttl: Optional[int] = None,
         stream_web_view: Optional[bool] = None,
+        block_ads: Optional[bool] = None,
         profile: Optional[Dict[str, Any]] = None,
+        location: Optional[Dict[str, str]] = None,
     ):
         """Create a new browser session.
 
@@ -1726,8 +1825,11 @@ class FirecrawlClient:
             ttl: Total time-to-live in seconds (30-3600, default 300)
             activity_ttl: Inactivity TTL in seconds (10-3600)
             stream_web_view: Whether to enable webview streaming
+            block_ads: Block ads, trackers and cookie notices (default ``True``)
             profile: Profile config with ``name`` (str) and
                 optional ``save_changes`` (bool, default ``True``)
+            location: ``{"country": "GB"}`` to browse from that country
+                (ISO 3166-1 alpha-2, default US)
 
         Returns:
             BrowserCreateResponse with session id and CDP URL
@@ -1737,7 +1839,9 @@ class FirecrawlClient:
             ttl=ttl,
             activity_ttl=activity_ttl,
             stream_web_view=stream_web_view,
+            block_ads=block_ads,
             profile=profile,
+            location=location,
         )
 
     def browser_execute(
@@ -1841,6 +1945,7 @@ class FirecrawlClient:
         max_age: Optional[int] = None,
         store_in_cache: Optional[bool] = None,
         lockdown: Optional[bool] = None,
+        check_prompt_injection: Optional[bool] = None,
         threat_protection: Optional[ThreatProtectionOptions] = None,
         audit_metadata: Optional[AuditMetadata] = None,
         webhook: Optional[Union[str, WebhookConfig]] = None,
@@ -1878,9 +1983,10 @@ class FirecrawlClient:
                 max_age=max_age,
                 store_in_cache=store_in_cache,
                 lockdown=lockdown,
+                check_prompt_injection=check_prompt_injection,
                 threat_protection=threat_protection,
             ).items() if v is not None}
-        ) if any(v is not None for v in [formats, headers, include_tags, exclude_tags, only_main_content, timeout, wait_for, mobile, parsers, actions, location, skip_tls_verification, remove_base64_images, fast_mode, use_mock, block_ads, proxy, max_age, store_in_cache, lockdown, threat_protection]) else None
+        ) if any(v is not None for v in [formats, headers, include_tags, exclude_tags, only_main_content, timeout, wait_for, mobile, parsers, actions, location, skip_tls_verification, remove_base64_images, fast_mode, use_mock, block_ads, proxy, max_age, store_in_cache, lockdown, check_prompt_injection, threat_protection]) else None
 
         return batch_module.batch_scrape(
             self.http_client,

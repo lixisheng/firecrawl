@@ -353,7 +353,7 @@ export async function batchScrapeController(
           agentIndexOnly: (req as any).agentIndexOnly ?? false,
           threatProtection: threatProtection.policy ?? undefined,
           // Safe Mode resolves per-URL at the scrapeURL backstop from these flags.
-          teamFlags: req.acuc?.flags ?? undefined,
+          teamFlags: req.acuc?.flags ?? null,
           safeModeBypassed: safeMode.bypassed === true,
         }, // NOTE: smart wait disabled for batch scrapes to ensure contentful scrape, speed does not matter
         team_id: req.auth.team_id,
@@ -362,6 +362,7 @@ export async function batchScrapeController(
         zeroDataRetention,
         v1: true,
         webhook: req.body.webhook,
+        origin: req.body.origin,
       };
 
   if (req.body.appendToId && (!sc || sc.team_id !== req.auth.team_id)) {
@@ -402,7 +403,7 @@ export async function batchScrapeController(
     // set base to 21
     jobPriority = await getJobPriority({
       team_id: req.auth.team_id,
-      org_id: req.acuc?.org_id ?? null,
+      acuc: req.acuc,
       basePriority: 21,
     });
   }

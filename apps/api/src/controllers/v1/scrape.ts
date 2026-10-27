@@ -1,5 +1,6 @@
 import { Response } from "express";
 import { config } from "../../config";
+import { timingSafeSecretEqual } from "../../lib/secret-compare";
 import { logger as _logger } from "../../lib/logger";
 import {
   Document,
@@ -50,7 +51,7 @@ import {
 import { projectScrapeCredits } from "../../lib/keyless-credit-projection";
 import { applyAgentAuthDiscoveryHeader } from "../../lib/agent-auth-discovery";
 import { resolveThreatProtection } from "../../lib/threat-protection/request";
-import { getEffectiveConcurrencyLimit } from "../../lib/concurrency-limit";
+import { DEFAULT_TEAM_LIMITS } from "../../services/autumn/autumn.service";
 
 export async function scrapeController(
   req: RequestWithAuth<{}, ScrapeResponse, ScrapeRequest>,
@@ -191,9 +192,10 @@ async function scrapeControllerInner(
 
   // const startTime = new Date().getTime();
 
-  const isDirectToBullMQ =
-    config.SEARCH_PREVIEW_TOKEN !== undefined &&
-    config.SEARCH_PREVIEW_TOKEN === req.body.__searchPreviewToken;
+  const isDirectToBullMQ = timingSafeSecretEqual(
+    req.body.__searchPreviewToken,
+    config.SEARCH_PREVIEW_TOKEN,
+  );
 
   const { scrapeOptions, internalOptions } = fromV1ScrapeOptions(
     req.body,
@@ -256,16 +258,13 @@ async function scrapeControllerInner(
     doc = await teamConcurrencySemaphore.withSemaphore(
       req.auth.team_id,
       jobId,
-      await getEffectiveConcurrencyLimit(
-        req.auth.team_id,
-        req.acuc?.org_id ?? null,
-      ),
+      req.acuc?.concurrency_limit ?? DEFAULT_TEAM_LIMITS.concurrency_limit,
       aborter.signal,
       timeout ?? 60_000,
       async limited => {
         const jobPriority = await getJobPriority({
           team_id: req.auth.team_id,
-          org_id: req.acuc?.org_id ?? null,
+          acuc: req.acuc,
           basePriority: 10,
         });
 
@@ -428,6 +427,17 @@ async function scrapeControllerInner(
 
       if (e.code === "THIRD_PARTY_DATA_NOT_FOUND") {
         return res.status(404).json({
+          success: false,
+          code: e.code,
+          error: e.message,
+        });
+      }
+
+      if (
+        e.code === "THIRD_PARTY_DATA_UNSUPPORTED_URL" ||
+        e.code === "THIRD_PARTY_DATA_UNSUPPORTED_OPTION"
+      ) {
+        return res.status(400).json({
           success: false,
           code: e.code,
           error: e.message,
