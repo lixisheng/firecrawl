@@ -37,8 +37,28 @@ import { ExistingCreditsLockError } from "./types";
 export const TEAM_FEATURE_ID = "TEAM";
 export const CREDITS_FEATURE_ID = "CREDITS";
 export const SEARCH_CREDITS_FEATURE_ID = "SEARCH_CREDITS";
+/**
+ * The balance hosted MCP calls spend before the endpoint's own feature (see
+ * AutumnService.trackHostedMcpCredits). Configurable so the id can follow the
+ * Autumn feature without a code change.
+ */
+export const MCP_CREDITS_FEATURE_ID = config.MCP_CREDITS_FEATURE_ID;
 const CONCURRENCY_FEATURE_ID = "CONCURRENCY";
 const RATE_LIMIT_FEATURE_ID = "rate_limits";
+
+/**
+ * The Autumn entity a charge on `featureId` is made against. MCP credits are
+ * granted to the customer rather than to a team, so their charges, holds and
+ * refunds carry no entity: with the team's entity, Autumn spends that team's
+ * own balances first, including a team-scoped CREDITS grant, and leaves the
+ * customer's MCP credits untouched.
+ */
+function billingEntityId(
+  featureId: string,
+  teamId: string,
+): string | undefined {
+  return featureId === MCP_CREDITS_FEATURE_ID ? undefined : teamId;
+}
 
 /**
  * Coerces a raw Autumn balance figure into a usable non-negative number, or
@@ -474,14 +494,17 @@ export class AutumnService {
   private async resolveBillingRoute(
     teamId: string,
     orgId: string,
-  ): Promise<{ customerId: string; routed: boolean }> {
-    const routed = shouldRouteToFirebill(orgId, {
-      gatewayProvisioned: await this.isGatewayProvisioned(teamId),
-    });
+  ): Promise<{
+    customerId: string;
+    routed: boolean;
+    gatewayProvisioned: boolean;
+  }> {
+    const gatewayProvisioned = await this.isGatewayProvisioned(teamId);
+    const routed = shouldRouteToFirebill(orgId, { gatewayProvisioned });
     if (!routed && !this.ensuredTeams.has(this.ensuredTeamKey(orgId, teamId))) {
       await this.ensureTeamProvisioned({ teamId, orgId });
     }
-    return { customerId: orgId, routed };
+    return { customerId: orgId, routed, gatewayProvisioned };
   }
 
   /**
@@ -497,15 +520,15 @@ export class AutumnService {
   }: TrackCreditsParams): Promise<{
     allowed: boolean;
     remaining: number;
+    /** Set only for a Gateway account, funded by the platform that created it. */
+    gatewayProvisioned?: boolean;
   } | null> {
     if (!autumnClient || this.isPreviewTeam(teamId)) {
       return null;
     }
     try {
-      const { customerId, routed } = await this.resolveBillingRoute(
-        teamId,
-        orgId,
-      );
+      const { customerId, routed, gatewayProvisioned } =
+        await this.resolveBillingRoute(teamId, orgId);
 
       // Mirrors track() and lockCredits(). Without this branch the gate reads
       // the ghost's balance alone, and a gateway ghost is designed to spend
@@ -526,18 +549,22 @@ export class AutumnService {
       if (routed) {
         const result = await firebillCheck({
           customerId,
-          entityId: teamId,
+          entityId: billingEntityId(featureId, teamId) ?? "",
           featureId,
           value,
           properties,
         });
         if (result.status === "unavailable") return null;
-        return { allowed: result.allowed, remaining: result.remaining };
+        return {
+          allowed: result.allowed,
+          remaining: result.remaining,
+          ...(gatewayProvisioned ? { gatewayProvisioned } : {}),
+        };
       }
 
       const { allowed, balance } = await autumnClient.check({
         customerId,
-        entityId: teamId,
+        entityId: billingEntityId(featureId, teamId),
         featureId,
         requiredBalance: value,
         properties,
@@ -553,7 +580,11 @@ export class AutumnService {
         allowed,
         remaining,
       });
-      return { allowed, remaining };
+      return {
+        allowed,
+        remaining,
+        ...(gatewayProvisioned ? { gatewayProvisioned } : {}),
+      };
     } catch (error) {
       logger.error(
         "Autumn checkCredits failed — billing API may be unavailable, falling back",
@@ -565,6 +596,18 @@ export class AutumnService {
       );
       return null;
     }
+  }
+
+  /**
+   * The feature a hosted MCP request's charge, hold or check is made on, in
+   * place of `featureId`: MCP credits, which Autumn spends first before
+   * falling back to other balances. A partner-provisioned team keeps
+   * `featureId`: its usage is split with the partner on the regular features.
+   */
+  async hostedMcpFeatureId(teamId: string, featureId: string): Promise<string> {
+    return (await this.isGatewayProvisioned(teamId))
+      ? featureId
+      : MCP_CREDITS_FEATURE_ID;
   }
 
   /**
@@ -637,7 +680,7 @@ export class AutumnService {
       if (routed) {
         const result = await firebillLock({
           customerId,
-          entityId: teamId,
+          entityId: billingEntityId(featureId, teamId) ?? "",
           featureId,
           value,
           lockId: resolvedLockId,
@@ -676,10 +719,11 @@ export class AutumnService {
         return { status: "denied", reason: "gate_unavailable" };
       }
 
+      const entityId = billingEntityId(featureId, teamId);
       const { allowed } = await autumnClient
         .check({
           customerId,
-          entityId: teamId,
+          entityId,
           featureId,
           requiredBalance: value,
           properties,
@@ -713,7 +757,7 @@ export class AutumnService {
 
       logger.info("Autumn lockCredits succeeded", {
         customerId,
-        entityId: teamId,
+        entityId,
         featureId,
         value,
         lockId: resolvedLockId,
@@ -850,7 +894,7 @@ export class AutumnService {
       return await this.track(
         {
           customerId,
-          entityId: teamId,
+          entityId: billingEntityId(featureId, teamId),
           featureId,
           value,
           properties,
@@ -946,7 +990,7 @@ export class AutumnService {
       return await this.track(
         {
           customerId,
-          entityId: teamId,
+          entityId: billingEntityId(featureId, teamId),
           featureId,
           value: -value,
           properties: { ...properties, source: "autumn_refund" },

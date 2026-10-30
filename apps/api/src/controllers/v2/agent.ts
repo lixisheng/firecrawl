@@ -142,7 +142,12 @@ export async function agentController(
           req.acuc?.org_id ?? null,
           threatScanCredits,
           req.acuc?.api_key_id ?? null,
-          { endpoint: "agent", jobId: agentId, chargeId: `${agentId}:threat` },
+          {
+            endpoint: "agent",
+            jobId: agentId,
+            chargeId: `${agentId}:threat`,
+            hostedMcp: req.auth.hostedMcp,
+          },
         ).catch(error => {
           logger.error(
             `Failed to bill team ${req.auth.team_id} for ${threatScanCredits} threat scan credit(s): ${error}`,
@@ -254,6 +259,7 @@ export async function agentController(
       orgId: req.auth.org_id,
       apiKeyId: req.acuc?.api_key_id ?? null,
       requestedMaxCredits: req.body.maxCredits,
+      hostedMcp: req.auth.hostedMcp,
     });
     if (!gate.allowed) {
       logger.warn("Insufficient credits to start agent run", {
@@ -316,6 +322,8 @@ export async function agentController(
         mode: req.body.mode,
         exchange: req.body.exchange,
         location: req.body.location,
+        safe: req.body.safe,
+        ...(req.auth.hostedMcp ? { hostedMcp: true } : {}),
         ...(zeroDataRetention ? { zeroDataRetention: true } : {}),
         ...(zeroDataRetentionMinutes !== null
           ? { zeroDataRetentionMinutes }
