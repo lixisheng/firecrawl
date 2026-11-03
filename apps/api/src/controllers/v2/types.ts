@@ -927,12 +927,7 @@ export const applyScrapeOptionsDefaults = <T extends ScrapeOptionsBase>(
   obj: T,
 ): T & { skipTlsVerification: boolean } => ({
   ...obj,
-  skipTlsVerification:
-    obj.skipTlsVerification ??
-    ((obj.headers && Object.keys(obj.headers).length > 0) ||
-    (obj.actions && obj.actions.length > 0)
-      ? false
-      : true),
+  skipTlsVerification: obj.skipTlsVerification ?? false,
 });
 
 /**
@@ -2189,6 +2184,9 @@ export type TeamFlags = {
   // The org's contract bars training on its data: FirePDF never captures its
   // documents (buildFirePdfTrainingCapture).
   trainingRestricted?: boolean;
+  // Every request is processed by US-based vendors only. A route with no US
+  // vendor is refused or skipped with a warning.
+  usOnly?: boolean;
   organizationDataSourceAccess?: Record<
     string,
     {
