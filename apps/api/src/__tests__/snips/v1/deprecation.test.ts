@@ -34,7 +34,9 @@ describe("Deprecation warnings on legacy endpoints", () => {
       true,
     );
     expect(res.body.replacement).toBeUndefined();
-    expect(res.headers["link"]).toBeUndefined();
+    expect(res.headers["link"]).toBe(
+      '<https://docs.firecrawl.dev/migrating-from-llmstxt>; rel="deprecation"',
+    );
   }, 30000);
 
   it("GET /v1/llmstxt/:jobId still emits warnings on 404", async () => {
@@ -66,22 +68,66 @@ describe("Deprecation warnings on legacy endpoints", () => {
     expect(res.statusCode).toBe(200);
     expect(res.headers["deprecation"]).toBe("@1778025600");
     expect(res.headers["warning"]).toMatch(/deep-research/i);
-    expect(res.headers["link"]).toContain(
-      '</v2/search>; rel="successor-version"',
+    expect(res.headers["link"]).toBe(
+      '<https://docs.firecrawl.dev/migrating-from-deep-research>; rel="deprecation", </v2/agent>; rel="successor-version"',
     );
     expect(Array.isArray(res.body.warnings)).toBe(true);
     expect(
       res.body.warnings.some((w: string) => /deep-research/i.test(w)),
     ).toBe(true);
-    expect(res.body.replacement).toBe("/v2/search");
+    expect(res.body.replacement).toBe("/v2/agent");
   }, 30000);
 
-  it("non-deprecated endpoints do not emit Deprecation header or warnings", async () => {
+  it("POST /v1/scrape points at /v2/scrape and the migration guide", async () => {
     const res = await request(TEST_API_URL)
       .post("/v1/scrape")
       .set("Authorization", `Bearer ${identity.apiKey}`)
       .set("Content-Type", "application/json")
       .send({ url: "https://firecrawl.dev" });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["deprecation"]).toBe("@1793923200");
+    expect(res.headers["sunset"]).toBe("Thu, 10 Dec 2026 15:00:00 GMT");
+    expect(res.headers["warning"]).toMatch(/\/v1\/scrape is deprecated/);
+    expect(res.headers["link"]).toBe(
+      '<https://docs.firecrawl.dev/migrate-to-v2>; rel="deprecation", </v2/scrape>; rel="successor-version"',
+    );
+    expect(res.body.warnings.some((w: string) => /\/v2\/scrape/.test(w))).toBe(
+      true,
+    );
+    expect(res.body.replacement).toBe("/v2/scrape");
+  }, 60000);
+
+  it("GET /v1/team/credit-usage points at its v2 route", async () => {
+    const res = await request(TEST_API_URL)
+      .get("/v1/team/credit-usage")
+      .set("Authorization", `Bearer ${identity.apiKey}`);
+
+    // Self-hosted has no billing client, so the status varies; the notice must not.
+    expect(res.headers["deprecation"]).toBe("@1793923200");
+    expect(res.headers["link"]).toContain(
+      '</v2/team/credit-usage>; rel="successor-version"',
+    );
+    expect(res.body.replacement).toBe("/v2/team/credit-usage");
+  }, 30000);
+
+  it("GET /v1/concurrency-check points at its v2 route", async () => {
+    const res = await request(TEST_API_URL)
+      .get("/v1/concurrency-check")
+      .set("Authorization", `Bearer ${identity.apiKey}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["deprecation"]).toBe("@1793923200");
+    expect(res.headers["link"]).toContain(
+      '</v2/concurrency-check>; rel="successor-version"',
+    );
+    expect(res.body.replacement).toBe("/v2/concurrency-check");
+  }, 30000);
+
+  it("non-deprecated endpoints do not emit Deprecation header or warnings", async () => {
+    const res = await request(TEST_API_URL)
+      .get("/v2/team/credit-usage")
+      .set("Authorization", `Bearer ${identity.apiKey}`);
 
     expect(res.headers["deprecation"]).toBeUndefined();
     expect(res.headers["warning"]).toBeUndefined();
