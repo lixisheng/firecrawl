@@ -37,27 +37,39 @@ const V1 = {
 const DEPRECATIONS = {
   v1_extract: {
     message:
-      "/v1/extract is deprecated. Use /v2/scrape with formats including a 'json' format object.",
+      "/v1/extract is deprecated. Use /v2/scrape with a 'json' format for a single page, or /v2/agent for wildcard URLs, web search or one answer across several pages. See https://docs.firecrawl.dev/migrating-from-extract.",
     replacement: "/v2/scrape",
     deprecatedAt: "@1778025600",
+    sunset: "Thu, 10 Dec 2026 15:00:00 GMT",
+    docs: "https://docs.firecrawl.dev/migrating-from-extract",
+    surface: "extract",
   },
   v1_extract_status: {
     message:
-      "/v1/extract/:jobId is deprecated. Use /v2/scrape with formats including a 'json' format object.",
+      "/v1/extract/:jobId is deprecated. Use /v2/scrape with a 'json' format for a single page, or /v2/agent for wildcard URLs, web search or one answer across several pages. See https://docs.firecrawl.dev/migrating-from-extract.",
     replacement: "/v2/scrape",
     deprecatedAt: "@1778025600",
+    sunset: "Thu, 10 Dec 2026 15:00:00 GMT",
+    docs: "https://docs.firecrawl.dev/migrating-from-extract",
+    surface: "extract",
   },
   v2_extract: {
     message:
-      "/v2/extract is deprecated. Use /v2/scrape with formats including a 'json' format object.",
+      "/v2/extract is deprecated. Use /v2/scrape with a 'json' format for a single page, or /v2/agent for wildcard URLs, web search or one answer across several pages. See https://docs.firecrawl.dev/migrating-from-extract.",
     replacement: "/v2/scrape",
     deprecatedAt: "@1778025600",
+    sunset: "Thu, 10 Dec 2026 15:00:00 GMT",
+    docs: "https://docs.firecrawl.dev/migrating-from-extract",
+    surface: "extract",
   },
   v2_extract_status: {
     message:
-      "/v2/extract/:jobId is deprecated. Use /v2/scrape with formats including a 'json' format object.",
+      "/v2/extract/:jobId is deprecated. Use /v2/scrape with a 'json' format for a single page, or /v2/agent for wildcard URLs, web search or one answer across several pages. See https://docs.firecrawl.dev/migrating-from-extract.",
     replacement: "/v2/scrape",
     deprecatedAt: "@1778025600",
+    sunset: "Thu, 10 Dec 2026 15:00:00 GMT",
+    docs: "https://docs.firecrawl.dev/migrating-from-extract",
+    surface: "extract",
   },
   v2_research_github_search: {
     message:
@@ -327,6 +339,12 @@ export function sunsetInstant(key: string, sunset: string | undefined): number {
   return at;
 }
 
+/** When the entry's route starts answering 410, Infinity without a sunset. */
+export function sunsetOf(key: DeprecationKey): number {
+  const dep: Deprecation = DEPRECATIONS[key];
+  return sunsetInstant(key, dep.sunset);
+}
+
 const EXTENSION_UNTIL = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d{3})?Z)?$/;
 
 /**
@@ -355,7 +373,7 @@ export function hasSunsetExtension(
  */
 export function deprecationMiddleware(key: DeprecationKey) {
   const dep: Deprecation = DEPRECATIONS[key];
-  const sunsetAt = sunsetInstant(key, dep.sunset);
+  const sunsetAt = sunsetOf(key);
 
   const annotate = (res: Response) => {
     setDeprecationHeaders(res, dep);
