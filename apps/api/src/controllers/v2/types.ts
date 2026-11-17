@@ -2147,6 +2147,7 @@ export type TeamFlags = {
     disablePlatformSelection?: boolean;
     disableCountrySelection?: boolean;
     disableAutomaticReferrer?: boolean;
+    respectPaywalls?: boolean;
     allowlist?: string[];
   };
   siemLogging?: boolean;
@@ -2154,6 +2155,9 @@ export type TeamFlags = {
   forceZDR?: boolean;
   allowZDR?: boolean;
   scrapeZDR?: "disabled" | "allowed" | "forced";
+  // Zero data retention for Alexandria provider tools and the Exchange proxy.
+  // Forced scrape ZDR implies it. Exchange is told per call by header.
+  alexandriaZDR?: "disabled" | "allowed" | "forced";
   searchZDR?: "disabled" | "allowed" | "forced" | "forced-zdr" | "forced-anon";
   zdrCost?: number;
   /** How long an agent run's ZDR result is kept, in minutes. Unset is the default (24 hours). */
@@ -2183,6 +2187,9 @@ export type TeamFlags = {
   // Every request is processed by US-based vendors only. A route with no US
   // vendor is refused or skipped with a warning.
   usOnly?: boolean;
+  // Alexandria Verified: the dashboard's Verified pages open, and Exchange
+  // providers marked verifiedOnly (Yelp) execute. Org flag, overridable per team.
+  alexandriaVerified?: boolean;
   // PDF and image parsing runs only on reserved processing capacity. A parse
   // that cannot be kept there is refused.
   reservedCapacity?: boolean;
