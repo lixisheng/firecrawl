@@ -267,8 +267,16 @@ const configSchema = z.object({
   ),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_BASE_URL: z.string().optional(),
+  // Workload identity federation, used when OPENAI_API_KEY is unset: the
+  // pod's Google identity is exchanged for short-lived OpenAI tokens.
+  OPENAI_IDENTITY_PROVIDER_ID: emptyStringAsUndefined(z.string().trim().min(1)),
+  OPENAI_SERVICE_ACCOUNT_ID: emptyStringAsUndefined(z.string().trim().min(1)),
   // Key for US-only teams; OPENAI_API_KEY is never used for them.
   OPENAI_US_API_KEY: emptyStringAsUndefined(z.string().trim().min(1)),
+  // Service account for US-only teams, used when OPENAI_US_API_KEY is unset.
+  OPENAI_US_SERVICE_ACCOUNT_ID: emptyStringAsUndefined(
+    z.string().trim().min(1),
+  ),
   OPENROUTER_API_KEY: z.string().optional(),
   AUTUMN_SECRET_KEY: z.string().optional(),
   RESEND_API_KEY: z.string().optional(),
@@ -284,6 +292,8 @@ const configSchema = z.object({
   FEEDBACK_MAX_AGE_SEC: z.coerce.number().int().positive().default(120),
   FEEDBACK_DAILY_CAP_CREDITS: z.coerce.number().int().nonnegative().default(50),
   FEEDBACK_REFUND_ENABLED: z.stringbool().default(true),
+  // Kill switch for the feedback next step on Alexandria answers.
+  ALEXANDRIA_FEEDBACK_HINT_ENABLED: z.stringbool().default(true),
   ALEXANDRIA_FEEDBACK_WINDOW_SEC: z.coerce
     .number()
     .int()
@@ -391,6 +401,14 @@ const configSchema = z.object({
   PARSE_UPLOAD_STORAGE_DRIVER: z.enum(["local", "gcs"]).optional(),
   PARSE_UPLOAD_REF_SECRET: emptyStringAsUndefined(z.string().trim().min(1)),
   PARSE_UPLOAD_PUBLIC_BASE_URL: z.string().url().optional(),
+  // Files of hosted MCP shell sessions. The routes that store them exist only
+  // when this is set.
+  GCS_COMPUTER_SESSION_FILES_BUCKET_NAME: emptyStringAsUndefined(
+    z.string().trim().min(1),
+  ),
+  // The public address download links are built on. Defaults to the address
+  // the request came in on.
+  COMPUTER_SESSION_FILES_PUBLIC_BASE_URL: emptyStringAsUndefined(z.url()),
 
   // Google Cloud Pub/Sub
   PUBSUB_CREDENTIALS: z.string().optional(),

@@ -2130,6 +2130,8 @@ export type TeamFlags = {
   exchangeRetrieve?: boolean;
   alexandriaAutoTools?: boolean;
   alexandriaToolFusion?: boolean;
+  // Search skips highlights entirely, including their index lookups.
+  skipSearchHighlights?: boolean;
   ignoreRobots?: "disabled" | "allowed" | "forced";
   customRobotsAgent?: "disabled" | "allowed";
   threatProtection?: "disabled" | "allowed" | "forced";
@@ -2187,6 +2189,11 @@ export type TeamFlags = {
   // Every request is processed by US-based vendors only. A route with no US
   // vendor is refused or skipped with a warning.
   usOnly?: boolean;
+  // Staff-set: the org has a signed contract on file.
+  signedContract?: boolean;
+  // Staff-set: the date range of the org's enterprise pilot, as ISO 8601
+  // strings. No endDate means the pilot has no end.
+  enterprisePilot?: { startDate?: string; endDate?: string } | null;
   // Alexandria Verified: the dashboard's Verified pages open, and Exchange
   // providers marked verifiedOnly (Yelp) execute. Org flag, overridable per team.
   alexandriaVerified?: boolean;
@@ -3070,6 +3077,8 @@ export type EndpointFeedbackResponse =
       success: true;
       feedbackId: string;
       creditsRefunded: number;
+      /** Alexandria only: states the refund, or why there was none. */
+      message?: string;
       alreadySubmitted?: boolean;
       dailyCapReached?: boolean;
       websiteCapReached?: boolean;

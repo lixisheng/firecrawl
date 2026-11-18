@@ -26,6 +26,7 @@ import { authorizeProviders } from "./access";
 import { exchangeRequest } from "./client";
 import { isUsOnly } from "../../lib/us-only";
 import { isAlexandriaVerified } from "../../lib/alexandria-verified";
+import { alexandriaFeedbackStorage } from "../../lib/alexandria-feedback-storage";
 import {
   answerSchema,
   refusal,
@@ -86,8 +87,10 @@ const hash = (value: unknown) =>
 export const exchangeRequestId = (teamId: string, requestId: string) =>
   hash([teamId, requestId]);
 
+// The catalogue's own free reads: the tool lookup and the library shell.
+const CATALOGUE_READS = new Set(["find-tools", "library"]);
 const isCatalogueRead = (call: ProviderCall) =>
-  call.provider === "firecrawl" && call.capability === "find-tools";
+  call.provider === "firecrawl" && CATALOGUE_READS.has(call.capability);
 
 const unresolved = (chargeId: string) =>
   refusal(
@@ -149,6 +152,9 @@ export async function retrieveProviders(input: {
   maxCredits?: number;
   /** Trusted internal marker for zero-priced provider lines, already verified by the caller. */
   ultrasearch?: boolean;
+  /** The caller's origin and integration, when the request named them. Labels only. */
+  clientOrigin?: string;
+  clientIntegration?: string;
 }): Promise<ProviderRetrieval> {
   const notExecuted = (response: ExchangeResponse): ProviderRetrieval => ({
     ...response,
@@ -220,6 +226,14 @@ export async function retrieveProviders(input: {
   const usOnly = isUsOnly(input.flags);
   const alexandriaVerified = isAlexandriaVerified(input.flags);
   const ultrasearch = input.ultrasearch === true;
+  // Sent with every execution. Outside the fingerprint, so a repeat of the id replays its answer.
+  const caller = {
+    feedbackStorage: alexandriaFeedbackStorage(input.teamId, input.flags),
+    ...(input.clientOrigin ? { clientOrigin: input.clientOrigin } : {}),
+    ...(input.clientIntegration
+      ? { clientIntegration: input.clientIntegration }
+      : {}),
+  };
   const deadline = Date.now() + input.timeoutMs;
   // Appended only when set so existing fingerprints stay stable.
   const fingerprint = hash([
@@ -296,8 +310,9 @@ export async function retrieveProviders(input: {
     return notExecuted(unresolved(id));
   }
 
-  // A catalogue read is free and idempotent, so once its request id is claimed it skips the
-  // agreement and quote lookups and the credit hold and goes to Exchange with a zero budget.
+  // A catalogue read (the tool lookup or a library command) is free and idempotent, so once its
+  // request id is claimed it skips the agreement and quote lookups and the credit hold and goes
+  // to Exchange with a zero budget.
   // Exchange quotes against that budget itself and refuses with credit_budget_exceeded should
   // the read ever carry a price, in which case the full path below runs under the same claim
   // and deadline. The answer is recorded like any other, so a repeat of the id replays it.
@@ -321,6 +336,7 @@ export async function retrieveProviders(input: {
       ...(zeroDataRetention ? { zeroDataRetention } : {}),
       ...(usOnly ? { usOnly } : {}),
       ...(alexandriaVerified ? { alexandriaVerified } : {}),
+      ...caller,
       maximumCredits: 0,
       retryConnection: true,
     }).catch(error => {
@@ -647,6 +663,7 @@ export async function retrieveProviders(input: {
       ...(usOnly ? { usOnly } : {}),
       ...(alexandriaVerified ? { alexandriaVerified } : {}),
       ...(ultrasearch ? { ultrasearch } : {}),
+      ...caller,
       maximumCredits,
     }).catch(error => {
       throw new Error(`Alexandria did not answer: ${error?.message ?? error}`);
