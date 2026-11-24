@@ -1,6 +1,8 @@
 import "dotenv/config";
 import { z } from "zod";
-import { getMcpActionLogConfigErrors } from "./lib/mcp-action-log-config";
+import { emptyStringAsUndefined } from "./config-helpers";
+
+export { emptyStringAsUndefined };
 
 /* Codecs */
 const delimitedList = (separator = ",") => {
@@ -9,9 +11,6 @@ const delimitedList = (separator = ",") => {
     encode: arr => arr.join(separator),
   });
 };
-
-const emptyStringAsUndefined = <T extends z.ZodTypeAny>(schema: T) =>
-  z.preprocess(value => (value === "" ? undefined : value), schema.optional());
 
 const emptyStringAsDefault = <T extends z.ZodTypeAny>(schema: T) =>
   z.preprocess(value => (value === "" ? undefined : value), schema);
@@ -129,14 +128,10 @@ const configSchema = z.object({
   ),
   RESEARCH_PROXY_URL: z.string().url().optional(),
   SEARCH_PLATFORM_URL: z.string().url().optional(),
-  // When true, government search goes to RESEARCH_PROXY_URL, with the
-  // research and developer indexes, instead of SEARCH_PLATFORM_URL.
-  GOV_SEARCH_VIA_RESEARCH_PROXY: emptyStringAsDefault(
-    z.stringbool().default(false),
-  ),
   // When true, a plain web search that the search platform classifies as
-  // government is served through the Government Index. It needs
-  // SEARCH_PLATFORM_URL. Unset or empty, no search is routed.
+  // government is served through the Government Index on RESEARCH_PROXY_URL.
+  // It needs SEARCH_PLATFORM_URL for query classification. Unset or empty, no
+  // search is routed.
   GOV_ROUTING_ENABLED: emptyStringAsDefault(z.stringbool().default(false)),
   // The longest a plain web search waits for the routing decision before the
   // regular web search starts; a decision that takes longer routes nothing.
@@ -152,6 +147,8 @@ const configSchema = z.object({
   LABS_SEARCH_URL: z.string().url().optional(),
   LABS_SEARCH_SECRET: z.string().optional(),
   FRESH_FEED_URL: emptyStringAsUndefined(z.string().url()),
+  FRESH_FEED_CURATED_URL: emptyStringAsUndefined(z.string().url()),
+  FRESH_FEED_GLOBAL_URL: emptyStringAsUndefined(z.string().url()),
 
   // Express
   EXPRESS_TRUST_PROXY: z.coerce.number().optional(),
@@ -225,45 +222,6 @@ const configSchema = z.object({
   // TOR). Unset disables the check entirely (keyless behaves as before).
   SPUR_API_KEY: z.string().optional(),
 
-  // Threat protection (enterprise domain risk blocking). "normal" mode uses
-  // Google Web Risk. An unset key disables the provider (lookups then fail
-  // per the org's failurePolicy).
-  GOOGLE_WEB_RISK_API_KEY: z.string().optional(),
-  GOOGLE_WEB_RISK_API_URL: z
-    .string()
-    .url()
-    .default("https://webrisk.googleapis.com"),
-  // Google Web Risk Update API sync tuning. ZDR: "normal" mode checks run
-  // against a locally synced hash-prefix database (threatLists:computeDiff)
-  // instead of sending URLs to Google, and verdicts are never persisted.
-  //
-  // Floor for how often threatLists:computeDiff may run per list. Google's
-  // recommendedNextDiff is respected when it is later than this floor.
-  THREAT_LIST_SYNC_MIN_INTERVAL_SECONDS: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(60),
-  // A synced threat list older than this is treated as unavailable
-  // (provider-failure semantics → the org's failurePolicy decides).
-  THREAT_LIST_STALENESS_SECONDS: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(6 * 60 * 60),
-
-  // Zscaler ZIA provider ("zscaler" threat protection mode). Base-URL
-  // overrides exist for tests (mock ZIA server); production always uses the
-  // real endpoints derived from the org's vanity domain and cloud name.
-  ZSCALER_TOKEN_URL_OVERRIDE: z.string().url().optional(),
-  ZSCALER_API_URL_OVERRIDE: z.string().url().optional(),
-
-  // Organization SIEM logging delivery. The encryption key must decode to
-  // exactly 32 bytes; validation happens when a secret is encrypted/decrypted
-  // so self-hosted deployments that do not use this feature need no key.
-  SIEM_LOGGING_ENCRYPTION_KEY: z.string().optional(),
-  PARTNER_EGRESS_PROXY_URL: z.string().url().optional(),
-
   // API Keys & Authentication
   BULL_AUTH_KEY: z.string().optional(),
   BULL_AUTH_KEY_PREVIOUS: emptyStringAsUndefined(z.string()),
@@ -292,7 +250,6 @@ const configSchema = z.object({
   RESEND_API_KEY: z.string().optional(),
   PREVIEW_TOKEN: z.string().optional(),
   SEARCH_PREVIEW_TOKEN: z.string().optional(),
-  SEARCH_SERVICE_API_SECRET: z.string().optional(),
   SEARCH_FEEDBACK_MAX_AGE_SEC: z.coerce.number().int().positive().default(300),
   SEARCH_FEEDBACK_DAILY_CAP_CREDITS: z.coerce
     .number()
@@ -345,27 +302,6 @@ const configSchema = z.object({
   // OAuth token introspection
   OAUTH_INTROSPECT_URL: z.string().optional(),
   OAUTH_INTROSPECT_SECRET: z.string().optional(),
-  MCP_ACTION_LOG_SECRET: z.string().optional(),
-  MCP_ACTION_LOG_STORAGE_ENABLED: z.stringbool().default(false),
-  MCP_ACTION_LOG_WRITES_ENABLED: z.stringbool().default(false),
-  // Comma-separated https URL prefixes, each ending in "/". Besides the
-  // canonical hosted MCP URLs, an action log may name a resource made of one
-  // of these, a deployment name and a canonical MCP path.
-  MCP_ACTION_LOG_RESOURCE_PREFIXES: emptyStringAsUndefined(
-    z
-      .string()
-      .refine(
-        value =>
-          value
-            .split(",")
-            .every(prefix =>
-              /^https:\/\/[a-z0-9.-]+(?::\d+)?\/(?:[a-z0-9._~-]+\/)*$/.test(
-                prefix.trim(),
-              ),
-            ),
-        "MCP_ACTION_LOG_RESOURCE_PREFIXES must be comma-separated https URL prefixes ending in /",
-      ),
-  ),
   // Autumn feature id of the balance hosted MCP calls spend first (see
   // AutumnService.trackHostedMcpCredits).
   MCP_CREDITS_FEATURE_ID: emptyStringAsDefault(
@@ -383,13 +319,7 @@ const configSchema = z.object({
   POSTGRES_DB: z.string().default("postgres"),
   POSTGRES_USER: z.string().default("postgres"),
   POSTGRES_PASSWORD: z.string().default("postgres"),
-  DATABASE_URL: z.string().optional(),
-  DATABASE_REPLICA_URL: z.string().optional(),
   INDEX_DATABASE_URL: z.string().optional(),
-  // Pool sizing preset for this process (see db/pool-profiles.ts). Unset keeps
-  // the historical pool settings; deployments opt into `api`, `worker` or
-  // `utility` to keep connections warm within the pooler's client budget.
-  DB_POOL_PROFILE: emptyStringAsUndefined(z.enum(["api", "worker", "utility"])),
   INDEX_CACHE_REDIS_URL: z.string().optional(),
   // Negative (miss) caching TTL for index URL->id lookups, in ms. 0 disables
   // it; the cache then only shields lookups that find data. A positive value
@@ -478,7 +408,6 @@ const configSchema = z.object({
   BIGTABLE_PROJECT_ID: z.string().optional(),
   BIGTABLE_INSTANCE_ID: z.string().optional(),
   BIGTABLE_APP_PROFILE_ID: z.string().optional(),
-  BIGTABLE_CHANGE_TRACKING_TABLE: z.string().optional(),
   BIGTABLE_JOB_ACCESS_TABLE: z.string().optional(),
   BIGTABLE_FEEDBACK_JOBS_TABLE: z.string().optional(),
   BIGTABLE_SCRAPE_STATE_TABLE: z.string().optional(),
@@ -572,9 +501,6 @@ const configSchema = z.object({
   SEARXNG_ENDPOINT: z.string().optional(),
   SEARXNG_ENGINES: z.string().optional(),
   SEARXNG_CATEGORIES: z.string().optional(),
-  SEARCH_SERVICE_URL: z.string().optional(),
-  SEARCH_INDEX_SAMPLE_RATE: z.coerce.number().default(0.1),
-  ENABLE_SEARCH_INDEX: z.stringbool().optional(),
 
   // Worker Configuration
   WORKER_PORT: z.coerce.number().default(3005),
@@ -583,7 +509,6 @@ const configSchema = z.object({
   NUQ_WORKER_COUNT: z.coerce.number().default(5),
   NUQ_PREFETCH_WORKER_PORT: z.coerce.number().default(3011).catch(3011), // todo: investigate why .catch is needed
   NUQ_RECONCILER_WORKER_PORT: z.coerce.number().default(3012).catch(3012),
-  CCLOG_WORKER_PORT: z.coerce.number().default(3013).catch(3013),
   EXTRACT_WORKER_PORT: z.coerce.number().default(3004),
   NUQ_WAIT_MODE: z.string().optional(),
 
@@ -593,8 +518,6 @@ const configSchema = z.object({
   // Job & Lock Management
   JOB_LOCK_EXTEND_INTERVAL: z.coerce.number().default(10000),
   JOB_LOCK_EXTENSION_TIME: z.coerce.number().default(60000),
-  WORKER_LOCK_DURATION: z.coerce.number().default(60000),
-  WORKER_STALLED_CHECK_INTERVAL: z.coerce.number().default(30000),
   CONNECTION_MONITOR_INTERVAL: z.coerce.number().default(10),
   CANT_ACCEPT_CONNECTION_INTERVAL: z.coerce.number().default(2000),
 
@@ -606,7 +529,6 @@ const configSchema = z.object({
   // External Services
   PLAYWRIGHT_MICROSERVICE_URL: z.string().optional(),
   HTML_TO_MARKDOWN_SERVICE_URL: z.string().optional(),
-  SMART_SCRAPE_API_URL: z.string().optional(),
 
   // Fire PDF (OCR fallback for a % of PDFs)
   FIRE_PDF_ENABLE: z.stringbool().optional(),
@@ -797,7 +719,6 @@ const configSchema = z.object({
 
   // Indexing
   BACKGROUND_INDEX_TEAM_ID: z.string().optional(),
-  PRECRAWL_TEAM_ID: z.string().optional(),
 
   // System
   MAX_CPU: z.coerce.number().default(0.8),
@@ -843,7 +764,6 @@ const configSchema = z.object({
   GITHUB_RUN_NUMBER: z.string().optional(),
   GITHUB_REF_NAME: z.string().optional(),
   RESTRICTED_COUNTRIES: delimitedList(",").optional(),
-  DISABLE_ENGPICKER: z.stringbool().optional(),
   DISABLE_MONITORING: z.stringbool().default(false),
 
   // Stamp an inferred `integration` on unlabelled direct callers.
@@ -859,6 +779,10 @@ const configSchema = z.object({
       error: "AGENT_INTEROP_SECRET must not contain lone surrogates",
     })
     .optional(),
+
+  // Per-request internal JWTs; replaces AGENT_INTEROP_SECRET once rolled out.
+  INTERNAL_JWT_ENABLED: z.stringbool().default(false),
+  INTERNAL_JWT_PUBLIC_KEYS: z.string().optional(),
 
   // Wikipedia Enterprise API
   WIKIPEDIA_ENTERPRISE_USERNAME: z.string().optional(),
@@ -881,16 +805,6 @@ const configSchema = z.object({
   FIRE_PRIVACY_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
 
   NUQ_PREFETCH_WORKER_HEARTBEAT_URL: z.string().optional(),
-
-  ZDRCLEANER_HEARTBEAT_URL: z.string().optional(),
-
-  CCLOG_WORKER_HEARTBEAT_URL: z.string().optional(),
-
-  // Deterministic JSON extraction (reusable-json-mode)
-  EXTRACT_CODEGEN_MODEL: z.string().default("gemini-3.1-flash-lite"),
-  EXTRACT_ANCHOR_MODEL: z.string().default("openai/gpt-oss-120b"),
-  EXTRACT_LIGHT_MODEL: z.string().default("openai/gpt-oss-20b"),
-  CODE_SANDBOX_URL: z.string().default("ws://code-sandbox:3001"),
 });
 
 const validatedConfigSchema = configSchema.superRefine((value, context) => {
@@ -900,20 +814,6 @@ const validatedConfigSchema = configSchema.superRefine((value, context) => {
       path: ["GOV_ROUTING_ENABLED"],
       message:
         "GOV_ROUTING_ENABLED needs SEARCH_PLATFORM_URL: set it, or turn routing off",
-    });
-  }
-  if (value.GOV_SEARCH_VIA_RESEARCH_PROXY && !value.RESEARCH_PROXY_URL) {
-    context.addIssue({
-      code: "custom",
-      path: ["GOV_SEARCH_VIA_RESEARCH_PROXY"],
-      message: "GOV_SEARCH_VIA_RESEARCH_PROXY needs RESEARCH_PROXY_URL",
-    });
-  }
-  for (const error of getMcpActionLogConfigErrors(value)) {
-    context.addIssue({
-      code: "custom",
-      path: [error.path],
-      message: error.message,
     });
   }
 });
