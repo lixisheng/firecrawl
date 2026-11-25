@@ -1,14 +1,16 @@
 /*
  * The service's own extension, applied first in every service: its process
- * roles, its scrape engines and feature priorities, its LLM providers, and its
- * error classes.
+ * roles, its scrape engines and feature priorities, its search providers, its
+ * LLM providers, and its error classes.
  *
  * A role's module is loaded when the role runs and not before, so a process
  * loads only the code of the role it runs. For the same reason this file
  * imports only types and static metadata at the top: error classes are loaded
  * on the first error lookup, engine implementations are loaded on the first
- * engine call (`enabled`, `scrape`, or `maxReasonableTime`), and LLM provider
- * implementations are loaded on the first provider call (`enabled` or `model`).
+ * engine call (`enabled`, `scrape`, or `maxReasonableTime`), search provider
+ * implementations are loaded on the first provider call (`enabled` or
+ * `search`), and LLM provider implementations are loaded on the first provider
+ * call (`enabled` or `model`).
  */
 import type { Meta } from "../scraper/scrapeURL";
 import {
@@ -22,6 +24,13 @@ import {
   type LlmProvider,
   type LlmProviderName,
 } from "./llm-providers";
+import {
+  coreSearchProviderSpecs,
+  type CoreSearchProviderSpec,
+  type SearchProvider,
+  type SearchProviderName,
+} from "./search-providers";
+import { defaultBuildRequestSchemas } from "./request";
 import type { CoreParts, Worker } from "./service";
 
 const role = (load: () => { start: Worker["run"] }): Worker => ({
@@ -33,10 +42,6 @@ const workers: Record<string, Worker> = {
   "queue-worker": role(
     () =>
       require("../services/queue-worker") as typeof import("../services/queue-worker"),
-  ),
-  "extract-worker": role(
-    () =>
-      require("../services/extract-worker") as typeof import("../services/extract-worker"),
   ),
   "nuq-worker": role(
     () =>
@@ -53,18 +58,6 @@ const workers: Record<string, Worker> = {
   "nuq-reconciler-worker": role(
     () =>
       require("../services/worker/nuq-reconciler-worker") as typeof import("../services/worker/nuq-reconciler-worker"),
-  ),
-  "index-worker": role(
-    () =>
-      require("../services/indexing/index-worker") as typeof import("../services/indexing/index-worker"),
-  ),
-  "cclog-worker": role(
-    () =>
-      require("../services/cclog-worker") as typeof import("../services/cclog-worker"),
-  ),
-  "zdr-worker": role(
-    () =>
-      require("../services/zdr-worker") as typeof import("../services/zdr-worker"),
   ),
   harness: role(() => require("../harness") as typeof import("../harness")),
 };
@@ -92,6 +85,11 @@ export function coreParts(): CoreParts {
       quality: spec.quality,
       features: spec.features,
       ...(spec.explicitOnly ? { explicitOnly: true } : {}),
+      ...(spec.cache ? { cache: true } : {}),
+      ...(spec.fileOnly ? { fileOnly: true } : {}),
+      ...(spec.supportsProfile ? { supportsProfile: true } : {}),
+      ...(spec.prefetchesFiles ? { prefetchesFiles: true } : {}),
+      ...(spec.allowEmptyContent ? { allowEmptyContent: true } : {}),
       enabled: () => loadCoreEngine(spec.name).enabled(),
       scrape,
       maxReasonableTime: meta => {
@@ -102,6 +100,34 @@ export function coreParts(): CoreParts {
       },
     };
   };
+
+  let loadedSearchProviders:
+    | Map<SearchProviderName, SearchProvider>
+    | undefined;
+  const loadCoreSearchProvider = (name: SearchProviderName): SearchProvider => {
+    if (!loadedSearchProviders) {
+      const { coreSearchProviders } =
+        require("../search/providers") as typeof import("../search/providers");
+      loadedSearchProviders = new Map(
+        coreSearchProviders.map(provider => [provider.name, provider]),
+      );
+    }
+    const provider = loadedSearchProviders.get(name);
+    if (!provider) {
+      throw new Error(`Built-in search provider "${name}" is not defined`);
+    }
+    return provider;
+  };
+
+  const lazySearchProvider = (
+    spec: CoreSearchProviderSpec,
+  ): SearchProvider => ({
+    name: spec.name,
+    priority: spec.priority,
+    ...(spec.supportsUsOnly ? { supportsUsOnly: true } : {}),
+    enabled: () => loadCoreSearchProvider(spec.name).enabled(),
+    search: query => loadCoreSearchProvider(spec.name).search(query),
+  });
 
   let loadedLlmProviders: Map<LlmProviderName, LlmProvider> | undefined;
   const loadCoreLlmProvider = (name: LlmProviderName): LlmProvider => {
@@ -133,6 +159,7 @@ export function coreParts(): CoreParts {
           .coreErrors,
       engines: coreEngineSpecs.map(lazyEngine),
       engineFeatures: coreEngineFeatures,
+      searchProviders: coreSearchProviderSpecs.map(lazySearchProvider),
       llmProviders: coreLlmProviderNames.map(lazyLlmProvider),
       workers,
     },
@@ -143,5 +170,6 @@ export function coreParts(): CoreParts {
         ).logger.error(message, meta);
       },
     },
+    buildRequestSchemas: defaultBuildRequestSchemas,
   };
 }
