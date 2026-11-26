@@ -7,12 +7,7 @@ import {
   RequestWithAuth,
   toV0CrawlerOptions,
 } from "./types";
-import {
-  crawlToCrawler,
-  saveCrawl,
-  StoredCrawl,
-  markCrawlActive,
-} from "../../lib/crawl-redis";
+import { crawlToCrawler, saveCrawl, StoredCrawl } from "../../lib/crawl-redis";
 import { _addScrapeJobToBullMQ } from "../../services/queue-jobs";
 import { logger as _logger } from "../../lib/logger";
 import { generateCrawlerOptionsFromPrompt } from "../../scraper/scrapeURL/transformers/llmExtract";
@@ -33,6 +28,7 @@ import type { BillingMetadata } from "../../lib/billing-types";
 import { withZeroDataRetention } from "../../lib/otel-tracer";
 import { getErrorHttpResponse } from "../../lib/error";
 import { currentLimits } from "../../lib/limits";
+import { withWebhookSummaryForLog } from "../../services/webhook/log";
 
 export async function crawlController(
   req: RequestWithAuth<{}, CrawlResponse, CrawlRequest>,
@@ -56,8 +52,8 @@ export async function crawlController(
   });
 
   logger.debug("Crawl " + id + " starting", {
-    request: req.body,
-    originalRequest: preNormalizedBody,
+    request: withWebhookSummaryForLog(req.body),
+    originalRequest: withWebhookSummaryForLog(preNormalizedBody),
     account: req.account,
   });
 
@@ -276,8 +272,6 @@ export async function crawlController(
   });
 
   await saveCrawl(id, sc);
-
-  await markCrawlActive(id);
 
   await _addScrapeJobToBullMQ(
     {
